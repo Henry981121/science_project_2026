@@ -1,6 +1,6 @@
 # AI Image Detector — FusionDetector + GRL
 
-**Z.-H. Zhao, H.-Y. Li, and Q.-X. Shi**
+**C.-H. Chao, H.-Y. Li, and C.-H. Shih**
 *National Hualien Senior High School, Hualien, Taiwan*
 
 ---
