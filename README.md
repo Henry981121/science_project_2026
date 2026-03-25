@@ -24,6 +24,11 @@ Image → 5 Feature Extractors (CLIP / FFT / DCT / DIRE / NoisePrint)
 
 **GRL schedule (Ganin et al., 2015):** `λ_grl(t) = λ_max × (2 / (1 + e^{-γt}) - 1)`
 
+## Technical Documentation
+
+For detailed explanation of architecture components, feature extractors, fusion mechanisms, and training methodology:
+- 📚 [FusionDetector + GRL 完整技術文檔 (中文版)](https://hackmd.io/@Henryxiangxiang/rkeugIO-i-e)
+
 ## Requirements
 
 ```bash
