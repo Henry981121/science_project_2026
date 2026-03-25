@@ -1,5 +1,10 @@
 # AI Image Detector — FusionDetector + GRL
 
+**Z.-H. Zhao, H.-Y. Li, and Q.-X. Shi**
+*National Hualien Senior High School, Hualien, Taiwan*
+
+---
+
 A multi-stream AI-generated image detector using **Gradient Reversal Layer (GRL)** domain adversarial training. The model fuses 5 complementary feature streams (CLIP, FFT, DCT, DIRE, NoisePrint) through a Cross-Attention Transformer and learns generator-agnostic representations that generalise to unseen generators.
 
 ## Architecture
@@ -26,8 +31,6 @@ pip install torch torchvision scikit-learn pandas numpy pillow matplotlib scipy 
 # Optional: pip install grad-cam   (for Grad-CAM visualisation in s4_supplementary.py)
 # Optional: pip install pywt       (for NSS experiment in s4h_nss_experiment.py)
 ```
-
-> **Note:** This repo does not include the `src/feature_extractors` module (CLIP, DIRE, NoisePrint extractors) due to size constraints. Place it under `src/feature_extractors.py` before running `s3a_single_stream.py` or any downstream scripts.
 
 ## Setup
 
