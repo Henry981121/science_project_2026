@@ -27,9 +27,11 @@ Image → 5 Feature Extractors (CLIP / FFT / DCT / DIRE / NoisePrint)
 ## Requirements
 
 ```bash
-pip install torch torchvision scikit-learn pandas numpy pillow matplotlib scipy PyWavelets timm
-# Optional: pip install grad-cam   (for Grad-CAM visualisation in s4_supplementary.py)
-# Optional: pip install pywt       (for NSS experiment in s4h_nss_experiment.py)
+# 1. Install PyTorch with CUDA (must be done first)
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+# 2. Install all other dependencies
+pip install -r requirements.txt
 ```
 
 ## Setup
