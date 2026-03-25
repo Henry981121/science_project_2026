@@ -1,0 +1,562 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>組合特徵AI圖片辨識平台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg:      #111318;
+  --surface: #1a1d23;
+  --surface2: #21252d;
+  --border:  #2a2e38;
+  --border2: #363b47;
+  --text:    #d4d8e2;
+  --text2:   #7c8494;
+  --text3:   #4a5062;
+  --accent:  #5b8dee;
+  --danger:  #e05c6a;
+  --success: #3dba7c;
+  --radius:  8px;
+}
+
+body {
+  font-family: 'Noto Sans TC', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.6;
+  min-height: 100vh;
+}
+
+.shell {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 48px 24px 80px;
+}
+
+/* Header */
+header { margin-bottom: 40px; }
+
+.header-eyebrow {
+  font-size: 12px;
+  color: var(--accent);
+  margin-bottom: 10px;
+  letter-spacing: 0.04em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.header-eyebrow::before {
+  content: '';
+  display: inline-block;
+  width: 18px;
+  height: 1.5px;
+  background: var(--accent);
+  opacity: .7;
+}
+
+h1 {
+  font-size: 28px;
+  font-weight: 600;
+  color: #eaecf0;
+  margin-bottom: 10px;
+  letter-spacing: -0.01em;
+}
+
+.header-sub {
+  font-size: 14px;
+  color: var(--text2);
+  max-width: 540px;
+  line-height: 1.7;
+}
+
+/* Card */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.card-header {
+  padding: 13px 20px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text2);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.card-header::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--border2);
+  flex-shrink: 0;
+}
+
+.card-body { padding: 20px; }
+
+/* Grid */
+.main-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+@media (max-width: 680px) { .main-grid { grid-template-columns: 1fr; } }
+
+/* Upload */
+.upload-zone {
+  border: 1.5px dashed var(--border2);
+  border-radius: 6px;
+  padding: 36px 20px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color .18s, background .18s;
+  background: var(--surface2);
+  position: relative;
+}
+.upload-zone:hover, .upload-zone.drag {
+  border-color: var(--accent);
+  background: rgba(91, 141, 238, 0.05);
+}
+.upload-zone input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+  font-size: 100px;
+}
+.upload-icon {
+  width: 44px;
+  height: 44px;
+  margin: 0 auto 12px;
+  background: var(--surface);
+  border: 1px solid var(--border2);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  color: var(--text3);
+  transition: border-color .18s, color .18s;
+}
+.upload-zone:hover .upload-icon {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.upload-title {
+  font-size: 14px;
+  color: var(--text);
+  margin-bottom: 4px;
+  font-weight: 500;
+}
+.upload-sub {
+  font-size: 12px;
+  color: var(--text3);
+}
+
+/* Preview */
+#preview-wrap {
+  display: none;
+  margin-top: 14px;
+  position: relative;
+}
+#preview-wrap img {
+  width: 100%;
+  border-radius: 6px;
+  display: block;
+  border: 1px solid var(--border);
+}
+.preview-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  font-size: 11px;
+  background: rgba(17, 19, 24, .85);
+  border: 1px solid var(--border2);
+  padding: 2px 8px;
+  border-radius: 4px;
+  color: var(--text2);
+  backdrop-filter: blur(4px);
+}
+
+/* Button */
+#analyze-btn {
+  width: 100%;
+  margin-top: 12px;
+  padding: 11px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background .15s, opacity .15s;
+  display: none;
+  letter-spacing: 0.01em;
+}
+#analyze-btn:hover { background: #4a7de0; }
+#analyze-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+/* Placeholder */
+.placeholder {
+  text-align: center;
+  padding: 48px 20px;
+  color: var(--text3);
+  font-size: 13px;
+}
+.placeholder-icon {
+  font-size: 26px;
+  margin-bottom: 10px;
+  opacity: .4;
+}
+
+/* Verdict */
+#verdict-wrap { display: none; }
+
+.verdict-block {
+  padding: 18px;
+  border-radius: 6px;
+  margin-bottom: 20px;
+  text-align: center;
+  border: 1px solid;
+}
+.verdict-block.ai {
+  background: rgba(224, 92, 106, 0.07);
+  border-color: rgba(224, 92, 106, 0.3);
+}
+.verdict-block.real {
+  background: rgba(61, 186, 124, 0.07);
+  border-color: rgba(61, 186, 124, 0.3);
+}
+.verdict-label {
+  font-size: 11px;
+  color: var(--text2);
+  margin-bottom: 6px;
+  letter-spacing: 0.04em;
+}
+.verdict-main {
+  font-size: 30px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  letter-spacing: -0.02em;
+}
+.verdict-block.ai .verdict-main { color: var(--danger); }
+.verdict-block.real .verdict-main { color: var(--success); }
+.verdict-conf {
+  font-size: 13px;
+  color: var(--text2);
+}
+
+/* Section label */
+.section-label {
+  font-size: 11px;
+  color: var(--text3);
+  margin-bottom: 10px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* Stream bars */
+.stream-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.stream-name {
+  font-size: 12px;
+  color: var(--text2);
+  width: 40px;
+  flex-shrink: 0;
+}
+.stream-bar-wrap {
+  flex: 1;
+  background: var(--surface2);
+  border-radius: 99px;
+  height: 5px;
+  overflow: hidden;
+}
+.stream-bar {
+  height: 100%;
+  border-radius: 99px;
+  transition: width .55s cubic-bezier(.22, 1, .36, 1);
+}
+.stream-bar.ai { background: var(--danger); }
+.stream-bar.real { background: var(--success); }
+.stream-pct {
+  font-size: 11px;
+  width: 40px;
+  text-align: right;
+  flex-shrink: 0;
+  color: var(--text2);
+}
+.stream-verdict {
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  font-weight: 500;
+}
+.stream-verdict.ai { background: rgba(224, 92, 106, 0.15); color: var(--danger); }
+.stream-verdict.real { background: rgba(61, 186, 124, 0.13); color: var(--success); }
+
+/* Divider */
+.divider { height: 1px; background: var(--border); margin: 16px 0; }
+
+/* Weight rings */
+.weights-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+}
+.weight-item { text-align: center; }
+.weight-ring {
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 6px;
+  position: relative;
+}
+.weight-ring svg { transform: rotate(-90deg); }
+.weight-ring-label {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  color: var(--text2);
+}
+.weight-name { font-size: 10px; color: var(--text3); }
+
+/* Heatmap */
+#heatmap-panel { display: none; grid-column: 1 / -1; }
+.heatmap-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.heatmap-item img {
+  width: 100%;
+  border-radius: 6px;
+  display: block;
+  border: 1px solid var(--border);
+}
+.heatmap-caption {
+  font-size: 11px;
+  color: var(--text3);
+  text-align: center;
+  margin-top: 6px;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+</style>
+</head>
+<body>
+<div class="shell">
+
+<header>
+  <div class="header-eyebrow">影像鑑識工具</div>
+  <h1>組合特徵AI圖片辨識平台</h1>
+  <p class="header-sub">整合 CLIP、FFT、DCT、DIRE、Noise 五種分析方法，判斷圖片是否由 AI 生成。</p>
+</header>
+
+<div class="main-grid">
+
+  <!-- 上傳 -->
+  <div class="card">
+    <div class="card-header">上傳圖片</div>
+    <div class="card-body">
+      <div class="upload-zone" id="drop-zone">
+        <input type="file" id="file-input" accept="image/*" onchange="handleFile(this.files[0])">
+        <div class="upload-icon">↑</div>
+        <div class="upload-title">拖曳或點擊上傳</div>
+        <div class="upload-sub">支援 JPG、PNG、WebP</div>
+      </div>
+      <div id="preview-wrap">
+        <span class="preview-badge">原圖</span>
+        <img id="preview-img" src="" alt="preview">
+      </div>
+      <button id="analyze-btn" onclick="analyze()">開始分析</button>
+    </div>
+  </div>
+
+  <!-- 結果 -->
+  <div class="card">
+    <div class="card-header">偵測結果</div>
+    <div class="card-body">
+      <div class="placeholder" id="result-placeholder">
+        <div class="placeholder-icon">○</div>
+        上傳圖片後開始分析
+      </div>
+
+      <div id="verdict-wrap">
+        <div id="verdict-block" class="verdict-block">
+          <div class="verdict-label" id="verdict-label">判定結果</div>
+          <div class="verdict-main" id="verdict-main">—</div>
+          <div class="verdict-conf" id="verdict-conf"></div>
+        </div>
+
+        <div class="section-label">各分析串流</div>
+        <div id="stream-bars"></div>
+
+        <div class="divider"></div>
+
+        <div class="section-label">注意力權重</div>
+        <div class="weights-grid" id="weights-grid"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 熱力圖 -->
+  <div class="card" id="heatmap-panel">
+    <div class="card-header">Grad-CAM 視覺化</div>
+    <div class="card-body">
+      <div class="heatmap-grid">
+        <div>
+          <img id="heatmap-original" src="" alt="original">
+          <div class="heatmap-caption">原圖</div>
+        </div>
+        <div>
+          <img id="heatmap-cam" src="" alt="grad-cam">
+          <div class="heatmap-caption">Grad-CAM（紅色區域為 AI 特徵集中處）</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</div>
+
+<script>
+const API = 'http://localhost:8000';
+let selectedFile = null;
+
+const dz = document.getElementById('drop-zone');
+dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag'); });
+dz.addEventListener('dragleave', () => dz.classList.remove('drag'));
+dz.addEventListener('drop', e => {
+  e.preventDefault(); dz.classList.remove('drag');
+  if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+});
+
+function handleFile(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  selectedFile = file;
+  const reader = new FileReader();
+  reader.onload = e => {
+    document.getElementById('preview-img').src = e.target.result;
+    document.getElementById('preview-wrap').style.display = 'block';
+    const btn = document.getElementById('analyze-btn');
+    btn.style.display = 'block';
+    btn.textContent = '開始分析';
+    btn.disabled = false;
+    document.getElementById('result-placeholder').style.display = 'block';
+    document.getElementById('verdict-wrap').style.display = 'none';
+    document.getElementById('heatmap-panel').style.display = 'none';
+  };
+  reader.readAsDataURL(file);
+}
+
+async function analyze() {
+  if (!selectedFile) return;
+  const btn = document.getElementById('analyze-btn');
+  btn.disabled = true;
+  btn.textContent = '分析中…';
+
+  const form = new FormData();
+  form.append('file', selectedFile);
+
+  try {
+    const res = await fetch(`${API}/predict`, { method: 'POST', body: form });
+    if (!res.ok) throw new Error(`伺服器錯誤 ${res.status}`);
+    const data = await res.json();
+    renderResult(data);
+  } catch (err) {
+    alert('分析失敗：' + err.message + '\n\n請確認 mock_server.py 已啟動（uvicorn mock_server:app --port 8000）');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '重新分析';
+  }
+}
+
+function renderResult(data) {
+  document.getElementById('result-placeholder').style.display = 'none';
+  document.getElementById('verdict-wrap').style.display = 'block';
+
+  const isAI = data.fusion.prediction === 'AI';
+  const cls = isAI ? 'ai' : 'real';
+
+  const vb = document.getElementById('verdict-block');
+  vb.className = `verdict-block ${cls}`;
+  document.getElementById('verdict-label').textContent = isAI ? '判定為 AI 生成' : '判定為真實照片';
+  document.getElementById('verdict-main').textContent = isAI ? 'AI 生成' : '真實';
+  document.getElementById('verdict-conf').textContent = data.fusion.conf_str;
+
+  const STREAM_ORDER = ['clip', 'fft', 'dct', 'dire', 'noise'];
+  const bars = document.getElementById('stream-bars');
+  bars.innerHTML = '';
+  for (const s of STREAM_ORDER) {
+    const r = data.streams[s];
+    if (!r) continue;
+    const barPct = r.prediction === 'AI' ? r.prob_fake : (100 - r.prob_fake);
+    const barCls = r.prediction === 'AI' ? 'ai' : 'real';
+    bars.innerHTML += `
+      <div class="stream-row">
+        <span class="stream-name">${r.display_name}</span>
+        <div class="stream-bar-wrap">
+          <div class="stream-bar ${barCls}" style="width:0%" data-target="${barPct}"></div>
+        </div>
+        <span class="stream-pct">${barPct.toFixed(1)}%</span>
+        <span class="stream-verdict ${barCls}">${r.prediction === 'AI' ? 'AI' : '真實'}</span>
+      </div>`;
+  }
+  requestAnimationFrame(() => {
+    document.querySelectorAll('.stream-bar').forEach(b => {
+      b.style.width = b.dataset.target + '%';
+    });
+  });
+
+  const wg = document.getElementById('weights-grid');
+  wg.innerHTML = '';
+  const COLORS = { clip: '#5b8dee', fft: '#9b72f5', dct: '#f0a040', dire: '#e05c6a', noise: '#3dba7c' };
+  for (const s of STREAM_ORDER) {
+    const r = data.streams[s];
+    if (!r) continue;
+    const w = r.weight;
+    const c = COLORS[s] || '#5b8dee';
+    const circ = 2 * Math.PI * 18;
+    const dash = (w / 100) * circ;
+    wg.innerHTML += `
+      <div class="weight-item">
+        <div class="weight-ring">
+          <svg width="48" height="48" viewBox="0 0 48 48">
+            <circle cx="24" cy="24" r="18" fill="none" stroke="#2a2e38" stroke-width="4"/>
+            <circle cx="24" cy="24" r="18" fill="none" stroke="${c}" stroke-width="4"
+              stroke-dasharray="${dash} ${circ}" stroke-linecap="round"/>
+          </svg>
+          <div class="weight-ring-label">${w.toFixed(0)}%</div>
+        </div>
+        <div class="weight-name">${r.display_name}</div>
+      </div>`;
+  }
+
+  if (data.heatmap_b64) {
+    document.getElementById('heatmap-original').src = 'data:image/png;base64,' + data.original_b64;
+    document.getElementById('heatmap-cam').src = 'data:image/png;base64,' + data.heatmap_b64;
+    document.getElementById('heatmap-panel').style.display = 'block';
+  }
+}
+</script>
+</body>
+</html>
