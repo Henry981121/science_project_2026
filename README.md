@@ -32,12 +32,10 @@ For detailed explanation of architecture components, feature extractors, fusion 
 ## Requirements
 
 ```bash
-# 1. Install PyTorch with CUDA (must be done first)
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-
-# 2. Install all other dependencies
 pip install -r requirements.txt
 ```
+
+> **Note:** `requirements.txt` includes PyTorch with CUDA 12.1. All dependencies are pinned to specific versions for reproducibility.
 
 ## Setup
 
