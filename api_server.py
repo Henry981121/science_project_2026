@@ -6,12 +6,14 @@ AI Detector — FastAPI Backend
 """
 
 import io
+from pathlib import Path
 from typing import Optional
 from PIL import Image
 
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from detector import AIDetector, STREAMS, STREAM_DISPLAY, conf_str, numpy_to_b64
 
@@ -79,3 +81,9 @@ async def predict(file: UploadFile = File(...), streams: Optional[str] = Form(No
 @app.get('/health')
 def health():
     return {'status': 'ok'}
+
+
+# Serve frontend — 讓 http://IP:8000/ 直接顯示網頁
+@app.get('/')
+def serve_index():
+    return FileResponse(Path(__file__).parent / 'index.html')

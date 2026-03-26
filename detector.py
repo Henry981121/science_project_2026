@@ -20,15 +20,14 @@ from PIL import Image
 from torchvision import transforms
 import matplotlib.cm as cm
 
-# ── 路徑設定（請依照實際位置修改）────────────────────────────────────
-# tech_project 資料夾位置（含 s3_main_grl.py 和 src/feature_extractors.py）
-TECH_PROJECT_DIR = Path(__file__).parent.parent / 'tech_project'
+# ── 路徑設定 ────────────────────────────────────────────────────────
+TECH_PROJECT_DIR = Path(r'C:\Users\harry\OneDrive\Desktop\新code 3.17')
+OUTPUTS_DIR      = Path(r'C:\Users\harry\OneDrive\Desktop\outputs\3.22output')
 
-# 模型權重路徑
-MODEL_PATH       = TECH_PROJECT_DIR / 'outputs' / 'main_grl' / 'best_model.pth'
-EXP_A_DIR        = TECH_PROJECT_DIR / 'outputs' / 'exp_a'
-FEAT_DIR         = TECH_PROJECT_DIR / 'outputs' / 'exp_a' / 'features'
-GRADCAM_PATH     = TECH_PROJECT_DIR / 'outputs' / 'gradcam' / 'best_model.pth'
+MODEL_PATH       = OUTPUTS_DIR / 'main_grl' / 'best_model.pth'
+EXP_A_DIR        = OUTPUTS_DIR / 'exp_a'
+FEAT_DIR         = OUTPUTS_DIR / 'exp_a' / 'features'
+GRADCAM_PATH     = Path(r'C:\Users\harry\OneDrive\Desktop\outputs\exp_g_v2\checkpoints\resnet50_finetuned.pth')
 # ─────────────────────────────────────────────────────────────────────
 
 STREAMS = ['clip', 'fft', 'dct', 'dire', 'noise']
@@ -84,7 +83,8 @@ class AIDetector:
     def __init__(self):
         print('Loading AI Detector...')
 
-        # 把 tech_project 加入 import 路徑
+        # 把 Desktop 和 tech_project 加入 import 路徑
+        sys.path.insert(0, r'C:\Users\harry\OneDrive\Desktop')
         sys.path.insert(0, str(TECH_PROJECT_DIR))
 
         from src.feature_extractors import (

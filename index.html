@@ -507,7 +507,7 @@ h1 {
 </div>
 
 <script>
-const API = 'http://localhost:8000';
+const API = `http://${location.hostname}:8000`;
 
 document.addEventListener('click', e => {
   const item = e.target.closest('.stream-check-item');
