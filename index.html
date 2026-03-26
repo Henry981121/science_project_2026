@@ -356,6 +356,47 @@ h1 {
   margin-top: 6px;
 }
 
+/* Stream selector */
+#stream-selector { display: none; margin-top: 14px; }
+.stream-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.stream-check-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text2);
+  transition: border-color .15s, color .15s, background .15s;
+  user-select: none;
+}
+.stream-check-item:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.stream-check-item input[type="checkbox"] { display: none; }
+.stream-check-item.selected {
+  border-color: var(--accent);
+  background: rgba(91, 141, 238, 0.1);
+  color: var(--accent);
+}
+.stream-check-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border2);
+  flex-shrink: 0;
+  transition: background .15s;
+}
+.stream-check-item.selected .stream-check-dot { background: var(--accent); }
+
 /* Scrollbar */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
@@ -387,6 +428,33 @@ h1 {
         <span class="preview-badge">原圖</span>
         <img id="preview-img" src="" alt="preview">
       </div>
+
+      <div id="stream-selector">
+        <div class="section-label" style="margin-bottom:8px;">選擇分析模組</div>
+        <div class="stream-checks">
+          <label class="stream-check-item selected" data-stream="clip">
+            <input type="checkbox" value="clip" checked>
+            <span class="stream-check-dot"></span>CLIP
+          </label>
+          <label class="stream-check-item selected" data-stream="fft">
+            <input type="checkbox" value="fft" checked>
+            <span class="stream-check-dot"></span>FFT
+          </label>
+          <label class="stream-check-item selected" data-stream="dct">
+            <input type="checkbox" value="dct" checked>
+            <span class="stream-check-dot"></span>DCT
+          </label>
+          <label class="stream-check-item selected" data-stream="dire">
+            <input type="checkbox" value="dire" checked>
+            <span class="stream-check-dot"></span>DIRE
+          </label>
+          <label class="stream-check-item selected" data-stream="noise">
+            <input type="checkbox" value="noise" checked>
+            <span class="stream-check-dot"></span>Noise
+          </label>
+        </div>
+      </div>
+
       <button id="analyze-btn" onclick="analyze()">開始分析</button>
     </div>
   </div>
@@ -440,6 +508,14 @@ h1 {
 
 <script>
 const API = 'http://localhost:8000';
+
+document.addEventListener('click', e => {
+  const item = e.target.closest('.stream-check-item');
+  if (!item) return;
+  const cb = item.querySelector('input[type="checkbox"]');
+  cb.checked = !cb.checked;
+  item.classList.toggle('selected', cb.checked);
+});
 let selectedFile = null;
 
 const dz = document.getElementById('drop-zone');
@@ -457,6 +533,7 @@ function handleFile(file) {
   reader.onload = e => {
     document.getElementById('preview-img').src = e.target.result;
     document.getElementById('preview-wrap').style.display = 'block';
+    document.getElementById('stream-selector').style.display = 'block';
     const btn = document.getElementById('analyze-btn');
     btn.style.display = 'block';
     btn.textContent = '開始分析';
@@ -470,12 +547,16 @@ function handleFile(file) {
 
 async function analyze() {
   if (!selectedFile) return;
+  const checked = [...document.querySelectorAll('.stream-checks input:checked')].map(c => c.value);
+  if (checked.length === 0) { alert('請至少選擇一個分析模組'); return; }
+
   const btn = document.getElementById('analyze-btn');
   btn.disabled = true;
   btn.textContent = '分析中…';
 
   const form = new FormData();
   form.append('file', selectedFile);
+  form.append('streams', checked.join(','));
 
   try {
     const res = await fetch(`${API}/predict`, { method: 'POST', body: form });

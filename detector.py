@@ -170,17 +170,18 @@ class AIDetector:
                 return c[-1]
         return children[-2] if len(children) > 1 else None
 
-    def analyze_image(self, image_pil: Image.Image) -> dict:
+    def analyze_image(self, image_pil: Image.Image, enabled_streams: list = None) -> dict:
+        active = [s for s in STREAMS if s in (enabled_streams or STREAMS)]
         img_pil = image_pil.convert('RGB')
         img_224 = img_pil.resize((224, 224))
         img_np = np.array(img_224)
         img_tensor = EVAL_TF(img_pil)
         img_batch = img_tensor.unsqueeze(0).to(DEVICE)
 
-        # Per-stream 預測
+        # Per-stream 預測（只跑啟用的 streams）
         stream_results = {}
         stream_importance = {}
-        for s in STREAMS:
+        for s in active:
             if s not in self.heads:
                 continue
             with torch.no_grad():
@@ -214,9 +215,12 @@ class AIDetector:
             heatmaps['resnet50'] = (overlay * 255).astype(np.uint8)
         img_resnet.requires_grad_(False)
 
-        # Fusion 預測
+        # Fusion 預測（未啟用的 stream 特徵補零）
         with torch.no_grad():
-            feats = [self.extractors[s].extract_features(img_batch) for s in STREAMS]
+            feats = []
+            for s in STREAMS:
+                f = self.extractors[s].extract_features(img_batch)
+                feats.append(f if s in active else torch.zeros_like(f))
             fused = torch.cat(feats, dim=1)
             lb, _, _, attn_weights = self.fusion(fused, grl_lambda=0)
             fusion_prob = F.softmax(lb / TEMPERATURE, dim=1)[0, 1].item()

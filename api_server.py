@@ -6,9 +6,10 @@ AI Detector — FastAPI Backend
 """
 
 import io
+from typing import Optional
 from PIL import Image
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -29,7 +30,7 @@ print('API ready.')
 
 
 @app.post('/predict')
-async def predict(file: UploadFile = File(...)):
+async def predict(file: UploadFile = File(...), streams: Optional[str] = Form(None)):
     if not file.content_type.startswith('image/'):
         raise HTTPException(status_code=400, detail='Please upload an image file.')
 
@@ -39,7 +40,11 @@ async def predict(file: UploadFile = File(...)):
     except Exception:
         raise HTTPException(status_code=400, detail='Cannot decode image.')
 
-    result = detector.analyze_image(img_pil)
+    enabled = [s for s in streams.split(',') if s in STREAMS] if streams else STREAMS
+    if not enabled:
+        raise HTTPException(status_code=400, detail='No valid streams selected.')
+
+    result = detector.analyze_image(img_pil, enabled_streams=enabled)
     f = result['fusion']
 
     streams_out = {}
