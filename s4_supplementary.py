@@ -1,7 +1,9 @@
 """
 Supplementary Experiments (Steps 5-11)
 =======================================
-5. Grad-CAM visualization (pytorch-grad-cam)
+5. [REMOVED] Grad-CAM (舊版用獨立 ResNet50，與五流融合模型無關)
+              → 改用 src/xai/per_stream_gradcam.py 的 PerStreamExplainer
+              → 由 ai_detector_demo.py / day1_test.py 驅動
 6. Attention Map (Real vs Fake weight comparison)
 7. NSS 驗真實驗
 8. 頻譜視覺化 (GAN vs Diffusion vs Real)
@@ -9,7 +11,7 @@ Supplementary Experiments (Steps 5-11)
 10. 多種子重跑 (separate script needed, skip)
 11. 錯誤類型分析 (FP vs FN on G2)
 
-Usage: python s4_supplementary.py [5|6|7|8|11|all]
+Usage: python s4_supplementary.py [6|7|8|11|all]
 """
 import sys, io, json, argparse
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8') if hasattr(sys.stdout, 'buffer') else sys.stdout
@@ -42,87 +44,11 @@ EVAL_TF = transforms.Compose([
 
 
 # ══════════════════════════════════════════════════════════
-# Step 5: Grad-CAM (using pytorch-grad-cam package)
+# Step 5: Grad-CAM — 已移除
+# 舊版用獨立 ResNet50 跑 GradCAM++，與五流融合模型無關，是假的解釋。
+# 真正對應融合模型的 Grad-CAM 在 src/xai/per_stream_gradcam.py，
+# 由 ai_detector_demo.py（互動）/ day1_test.py（單張測試）驅動。
 # ══════════════════════════════════════════════════════════
-
-def step5_gradcam():
-    print("\n" + "="*60)
-    print("  Step 5: Grad-CAM Visualization")
-    print("="*60)
-
-    try:
-        from pytorch_grad_cam import GradCAMPlusPlus
-        from pytorch_grad_cam.utils.image import show_cam_on_image
-    except ImportError:
-        print("  Installing pytorch-grad-cam...")
-        import subprocess
-        subprocess.run([sys.executable, "-m", "pip", "install", "grad-cam", "-q"])
-        from pytorch_grad_cam import GradCAMPlusPlus
-        from pytorch_grad_cam.utils.image import show_cam_on_image
-
-    import torchvision.models as models
-    import torch.nn as nn
-    import cv2
-
-    # Load ResNet50 (trained for AI detection)
-    resnet_path = OUTPUTS_DIR / 'grad cam 測試' / 'gradcam' / 'best_model.pth'
-    if not resnet_path.exists():
-        print("  ResNet50 model not found, training one...")
-        model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
-        model.fc = nn.Linear(2048, 2)
-        model.to(DEVICE).eval()
-        # Quick train
-        df = pd.read_csv(TEST_CSV).sample(2000, random_state=42)
-        # Skip training, just use pretrained for demo
-    else:
-        model = models.resnet50(weights=None)
-        model.fc = nn.Linear(2048, 2)
-        model.load_state_dict(torch.load(resnet_path, map_location=DEVICE, weights_only=True))
-        model.to(DEVICE).eval()
-
-    target_layer = model.layer4[-1]
-    cam = GradCAMPlusPlus(model=model, target_layers=[target_layer])
-
-    # Select 5 real + 5 fake
-    df = pd.read_csv(TEST_CSV)
-    real_df = df[df['label'] == 0].sample(5, random_state=42)
-    fake_df = df[df['label'] == 1].sample(5, random_state=42)
-    selected = list(zip(real_df['path'], [0]*5, real_df['generator'])) + \
-               list(zip(fake_df['path'], [1]*5, fake_df['generator']))
-
-    fig, axes = plt.subplots(2, len(selected), figsize=(3*len(selected), 6))
-    fig.suptitle("Grad-CAM++: AI Image Detection\nTop: Original | Bottom: Heatmap (Red = AI Artifact)", fontsize=13, fontweight='bold')
-
-    for i, (path, label, gen) in enumerate(selected):
-        try:
-            img_pil = Image.open(path).convert('RGB').resize((224, 224))
-        except:
-            img_pil = Image.new('RGB', (224, 224), 128)
-        img_np = np.array(img_pil).astype(np.float32) / 255.0
-        img_tensor = EVAL_TF(Image.open(path).convert('RGB') if Path(path).exists() else Image.new('RGB', (224, 224), 128))
-
-        grayscale_cam = cam(input_tensor=img_tensor.unsqueeze(0).to(DEVICE))
-        visualization = show_cam_on_image(img_np, grayscale_cam[0], use_rgb=True)
-
-        with torch.no_grad():
-            out = model(img_tensor.unsqueeze(0).to(DEVICE))
-            prob = F.softmax(out, 1)[0, 1].item()
-            pred = "AI" if out.argmax(1).item() == 1 else "Real"
-
-        gt = "Real" if label == 0 else "AI"
-        color = "green" if pred == gt else "red"
-
-        axes[0, i].imshow((img_np * 255).astype(np.uint8))
-        axes[0, i].set_title(f"GT:{gt}\nPred:{pred}({prob:.2f})", fontsize=8, color=color)
-        axes[0, i].axis('off')
-        axes[1, i].imshow(visualization)
-        axes[1, i].axis('off')
-
-    plt.tight_layout()
-    out_path = OUTPUT_DIR / 'step5_gradcam.png'
-    plt.savefig(out_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  Saved: {out_path}")
 
 
 # ══════════════════════════════════════════════════════════
@@ -395,8 +321,9 @@ def main():
     steps = args.steps
     run_all = 'all' in steps
 
-    if run_all or '5' in steps:
-        step5_gradcam()
+    if '5' in steps:
+        print("\n[Step 5] Grad-CAM 已移除（舊版用獨立 ResNet50 是假的）。"
+              "請改跑 day1_test.py 或 ai_detector_demo.py 以使用 PerStreamExplainer。")
     if run_all or '6' in steps:
         step6_attention()
     if run_all or '8' in steps:

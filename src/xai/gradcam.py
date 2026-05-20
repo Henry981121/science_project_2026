@@ -9,8 +9,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import cv2
-from typing import Dict, Optional, Tuple
+from typing import Optional
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -79,145 +78,22 @@ class GradCAM:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Multi-Stream Explainer
+# Multi-Stream Explainer — DEPRECATED
+# ──────────────────────────────────────────────────────────────────────
+# 舊的 MultiStreamExplainer 整個包在 @torch.no_grad() 底下，回傳的只是
+# 輸入域變換（FFT spectrum / DCT map / DIRE error / SRM noise）而不是真
+# 對五流融合模型的 Grad-CAM——本質上不是「解釋」。
+#
+# 真版本見 src.xai.per_stream_gradcam.PerStreamExplainer：
+#   - FFT / DCT / DIRE / Noise: 真 Grad-CAM
+#   - CLIP: attention rollout（Day 2-3 換成 Chefer relevance）
 # ──────────────────────────────────────────────────────────────────────
 
 class MultiStreamExplainer:
-    """
-    Generates per-stream explanations:
-      - CLIP:  Attention Rollout
-      - FFT:   FFT spectrum map
-      - DCT:   DCT map
-      - DIRE:  reconstruction error map
-      - Noise: SRM noise map
-    Then aggregates into a single heatmap.
-    """
+    """Deprecated — 立即指向 PerStreamExplainer。"""
 
-    PATCH_GRID = 16  # ViT-L/14 -> 16x16 patches for 224x224
-
-    def __init__(self, model, device: str = "cuda"):
-        """
-        model: AIImageDetector instance
-        """
-        self.model  = model
-        self.device = device
-
-    @torch.no_grad()
-    def explain(self, image: torch.Tensor) -> Dict[str, np.ndarray]:
-        """
-        Args:
-            image: (1, 3, H, W) ImageNet-normalized
-
-        Returns:
-            dict of stream_name -> explanation array (H, W) in [0,1]
-        """
-        exps = {}
-
-        # 1. CLIP — Attention Rollout
-        rollout = self.model.extractors["clip"].get_attention_rollout(image)
-        # rollout: (1, 256) for 16x16 patches
-        r = rollout[0].cpu().numpy()
-        grid = int(r.shape[0] ** 0.5)
-        r_map = r.reshape(grid, grid)
-        exps["clip"] = self._normalize(r_map)
-
-        # 2. FFT — spectrum map
-        spec = self.model.extractors["fft"].get_spectrum(image)
-        exps["fft"] = self._normalize(spec[0].mean(0).cpu().numpy())
-
-        # 3. DCT — DCT map
-        dct_map = self.model.extractors["dct"].get_dct_visualization(image)
-        exps["dct"] = self._normalize(dct_map[0].mean(0).cpu().numpy())
-
-        # 4. DIRE — reconstruction error
-        dire_map = self.model.extractors["dire"].get_dire_visualization(image)
-        exps["dire"] = self._normalize(dire_map[0].mean(0).cpu().numpy())
-
-        # 5. Noise — SRM noise map
-        noise_map = self.model.extractors["noise"].get_noise_map(image)
-        exps["noise"] = self._normalize(noise_map[0].mean(0).cpu().numpy())
-
-        return exps
-
-    def aggregate(self, exps: Dict[str, np.ndarray], target_hw: Tuple[int,int] = (224, 224)) -> np.ndarray:
-        """Resize all maps to target_hw, then average."""
-        maps = []
-        for name, m in exps.items():
-            resized = cv2.resize(m.astype(np.float32), (target_hw[1], target_hw[0]))
-            maps.append(resized)
-        return self._normalize(np.mean(maps, axis=0))
-
-    def overlay(
-        self,
-        image_np: np.ndarray,
-        heatmap: np.ndarray,
-        alpha: float = 0.5,
-    ) -> np.ndarray:
-        """
-        Overlay heatmap (H,W, [0,1]) onto image_np (H,W,3 uint8).
-        """
-        h, w = image_np.shape[:2]
-        heat = cv2.resize(heatmap, (w, h))
-        heat_uint8 = (heat * 255).astype(np.uint8)
-        colored = cv2.applyColorMap(heat_uint8, cv2.COLORMAP_JET)
-        colored = cv2.cvtColor(colored, cv2.COLOR_BGR2RGB)
-        return (colored * alpha + image_np * (1 - alpha)).astype(np.uint8)
-
-    def visualize_all(
-        self,
-        image_np: np.ndarray,
-        exps: Dict[str, np.ndarray],
-        save_dir: Optional[str] = None,
-    ) -> Dict[str, np.ndarray]:
-        """
-        Return overlay images for each stream + aggregated.
-        Optionally save to save_dir.
-        """
-        result = {}
-        target_hw = image_np.shape[:2]
-
-        for name, m in exps.items():
-            result[name] = self.overlay(image_np, m)
-
-        result["aggregated"] = self.overlay(
-            image_np, self.aggregate(exps, target_hw)
+    def __init__(self, *args, **kwargs):
+        raise RuntimeError(
+            "MultiStreamExplainer 已棄用（舊版不算真實梯度，回傳的不是 Grad-CAM）。"
+            "請改用 src.xai.per_stream_gradcam.PerStreamExplainer。"
         )
-
-        if save_dir:
-            import os
-            from PIL import Image
-            os.makedirs(save_dir, exist_ok=True)
-            for name, img in result.items():
-                Image.fromarray(img).save(os.path.join(save_dir, f"{name}.png"))
-            print(f"[XAI] Saved to {save_dir}")
-
-        return result
-
-    @staticmethod
-    def _normalize(arr: np.ndarray) -> np.ndarray:
-        mn, mx = arr.min(), arr.max()
-        return (arr - mn) / (mx - mn + 1e-8)
-
-
-# ──────────────────────────────────────────────────────────────────────
-# Quick test
-# ──────────────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    import sys, os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
-    from src.fusion.fusion_module import AIImageDetector
-
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = AIImageDetector(device=device)
-    img = torch.randn(1, 3, 224, 224).to(device)
-
-    explainer = MultiStreamExplainer(model, device=device)
-    exps = explainer.explain(img)
-
-    for name, m in exps.items():
-        print(f"  {name}: {m.shape}")
-
-    agg = explainer.aggregate(exps)
-    print(f"  aggregated: {agg.shape}")
-    print("XAI OK")

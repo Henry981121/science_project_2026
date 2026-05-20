@@ -1,14 +1,15 @@
 """
-AI Image Detector Demo — v3
+AI Image Detector Demo — v4
 ==============================
 1. Per-stream AI probability (from per-stream heads)
 2. Fusion model verdict (from GRL model)
-3. Stream importance (gradient-based, not attention)
-4. Grad-CAM heatmaps (ResNet50-style, clear red/blue)
+3. Stream importance (from cross-attention weights)
+4. Per-stream Grad-CAM heatmaps (真正對應五流模型，非獨立 ResNet50)
 
-Grad-CAM approach: Each stream extractor acts as its own end-to-end
-classifier (extractor + head). Grad-CAM is computed directly on the
-CNN backbone → produces clear heatmaps like the reference image.
+Grad-CAM 由 src/xai/per_stream_gradcam.py 的 PerStreamExplainer 提供：
+  - FFT / DCT / DIRE / Noise: 真 Grad-CAM (Selvaraju 2017)，target 為各
+    backbone 最後 conv block，backward target 為該流 EXP-A head 的 fake logit
+  - CLIP: 暫用 attention rollout（Day 2-3 會升級成 Chefer relevance）
 """
 import sys
 
@@ -17,14 +18,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import cv2
 from PIL import Image
 from pathlib import Path
 from torchvision import transforms
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import matplotlib.cm as cm
+
+from src.xai.per_stream_gradcam import PerStreamExplainer
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 from config import OUTPUTS_DIR, FEAT_CACHE_DIR
@@ -51,35 +52,9 @@ class LinearHead(nn.Module):
         return self.net(x)
 
 
-class GradCAM:
-    """Standard Grad-CAM — hooks into a conv layer, generates clear heatmap."""
-    def __init__(self, target_layer):
-        self.gradients = None
-        self.activations = None
-        target_layer.register_forward_hook(self._fwd)
-        target_layer.register_full_backward_hook(self._bwd)
-
-    def _fwd(self, m, i, o):
-        self.activations = o.detach()
-
-    def _bwd(self, m, gi, go):
-        self.gradients = go[0].detach()
-
-    def compute(self):
-        if self.gradients is None or self.activations is None:
-            return None
-        w = self.gradients.mean(dim=[2, 3], keepdim=True)
-        cam = (w * self.activations).sum(dim=1, keepdim=True)
-        cam = F.relu(cam).squeeze().cpu().numpy()
-        if cam.ndim < 2:
-            return None
-        cam = (cam - cam.min()) / (cam.max() - cam.min() + 1e-8)
-        return cam
-
-
 class AIDetector:
     def __init__(self):
-        print("Loading AI Detector v3...")
+        print("Loading AI Detector v4...")
 
         from src.feature_extractors import (
             CLIPFeatureExtractor, FFTFeatureExtractor,
@@ -117,13 +92,6 @@ class AIDetector:
                     p.requires_grad_(True)
                 self.heads[s] = h
 
-        # Setup Grad-CAM hooks on last conv layer of each CNN extractor
-        self.gradcams = {}
-        for s in ['fft', 'dct', 'dire', 'noise']:
-            target = self._get_target(s)
-            if target is not None:
-                self.gradcams[s] = GradCAM(target)
-
         # Load fusion model
         from s3_main_grl import FusionDetectorGRL
         ckpt = torch.load(MODEL_PATH, map_location=DEVICE, weights_only=False)
@@ -132,36 +100,11 @@ class AIDetector:
         self.fusion.load_state_dict(ckpt['model_state_dict'])
         self.fusion.to(DEVICE).eval()
 
-        # Load ResNet50 for Grad-CAM (produces clear heatmaps)
-        import torchvision.models as tv_models
-        resnet = tv_models.resnet50(weights=None)
-        resnet.fc = nn.Linear(2048, 2)
-        resnet.load_state_dict(torch.load(
-            Path(r'C:\Users\harry\OneDrive\Desktop\outputs\grad cam 測試\gradcam\best_model.pth'),
-            map_location=DEVICE, weights_only=True))
-        resnet = resnet.to(DEVICE)
-        resnet.eval()
-        self.resnet = resnet
-        self.resnet_gradcam = GradCAM(resnet.layer4[-1])
-        print("  ResNet50 Grad-CAM: loaded")
+        # Per-stream Grad-CAM explainer — 真正對應五流模型
+        self.explainer = PerStreamExplainer(self.extractors, self.heads, device=DEVICE)
+        print("  PerStreamExplainer: ready")
 
         print("Ready!")
-
-    def _get_target(self, s):
-        ext = self.extractors[s]
-        if s == 'fft':
-            children = list(ext.backbone.children())
-        elif s in ('dct', 'dire'):
-            children = list(ext.feature_net.children())
-        elif s == 'noise':
-            children = list(ext.cnn.children())
-        else:
-            return None
-        # Find last Sequential block (ResNet layer4 equivalent)
-        for c in reversed(children):
-            if isinstance(c, nn.Sequential) and len(list(c.children())) > 0:
-                return c[-1]
-        return children[-2] if len(children) > 1 else None
 
     def analyze_image(self, image_pil):
         img_pil = image_pil.convert('RGB')
@@ -193,23 +136,9 @@ class AIDetector:
         total_imp = sum(stream_importance.values()) + 1e-8
         stream_weights = {s: round(v / total_imp * 100, 1) for s, v in stream_importance.items()}
 
-        # ── ResNet50 Grad-CAM (clear, like reference image) ──
-        heatmaps = {}
-        img_resnet = EVAL_TF(img_pil).unsqueeze(0).to(DEVICE)
-        img_resnet.requires_grad_(True)
-        self.resnet.eval()
-        out = self.resnet(img_resnet)
-        pred_r = out.argmax(1).item()
-        self.resnet.zero_grad()
-        out[0, pred_r].backward()
-        cam = self.resnet_gradcam.compute()
-        if cam is not None:
-            cam_resized = cv2.resize(cam, (224, 224))
-            heatmap_color = cm.jet(cam_resized)[:, :, :3]
-            overlay = np.clip(0.5 * img_np / 255.0 + 0.5 * heatmap_color, 0, 1)
-            overlay_img = (overlay * 255).astype(np.uint8)
-            heatmaps['resnet50'] = overlay_img
-        img_resnet.requires_grad_(False)
+        # ── Per-stream Grad-CAM (FFT/DCT/DIRE/Noise + CLIP) ──
+        # 對應到融合模型每條流，非獨立 ResNet50
+        heatmaps = self.explainer.explain_image(img_batch)
 
         # ── Fusion prediction + Attention Weights ──
         with torch.no_grad():
@@ -293,30 +222,17 @@ def create_gradio_app(detector):
         colors_p = ['#4C72B0', '#55A868', '#C44E52', '#8172B2', '#CCB974']
         ax.pie(sizes, labels=labels, autopct='%1.1f%%', colors=colors_p[:len(labels)],
                startangle=90, textprops={'fontsize': 11})
-        ax.set_title('Stream Importance\n(Gradient-based)', fontsize=12, fontweight='bold')
+        ax.set_title('Stream Importance\n(Cross-Attention)', fontsize=12, fontweight='bold')
         plt.tight_layout()
 
-        # ── Grad-CAM figure (like reference: top=original, bottom=heatmap) ──
-        hm = result['heatmaps']
+        # ── Per-stream Grad-CAM figure: 原圖 + 5 條流 ──
         verdict = f['prediction']
-
-        fig_cam, axes = plt.subplots(1, 2, figsize=(10, 5))
-        axes[0].imshow(result['original'])
-        axes[0].set_title('Original', fontsize=13, fontweight='bold')
-        axes[0].axis('off')
-
-        if 'resnet50' in hm:
-            axes[1].imshow(hm['resnet50'])
-        else:
-            axes[1].imshow(result['original'])
-        axes[1].set_title('Grad-CAM (Red = AI Artifact Region)', fontsize=13, fontweight='bold')
-        axes[1].axis('off')
-
         prob_str = _conf_str(f['prob_fake'], verdict)
-        fig_cam.suptitle(f'Verdict: {verdict} ({prob_str})',
-                         fontsize=14, fontweight='bold',
-                         color='#C44E52' if verdict == 'AI' else '#55A868')
-        plt.tight_layout()
+        fig_cam = detector.explainer.visualize(
+            result['original'],
+            result['heatmaps'],
+            title=f'Verdict: {verdict} ({prob_str})',
+        )
 
         return text, fig_w, fig_cam
 
