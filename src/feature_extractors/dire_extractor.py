@@ -96,12 +96,21 @@ class DIREFeatureExtractor(nn.Module):
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         return self.extract_features(images)
 
-    def extract_features(self, images: torch.Tensor) -> torch.Tensor:
-        with torch.no_grad():
-            error_map = self._compute_dire_map(images)
-            feat = self.feature_net(error_map).flatten(1)
-            feat = self.projection(feat)
+    def _forward_features(self, images: torch.Tensor) -> torch.Tensor:
+        error_map = self._compute_dire_map(images)
+        feat = self.feature_net(error_map).flatten(1)
+        feat = self.projection(feat)
         return feat
+
+    def extract_features(self, images: torch.Tensor, xai_mode: bool = False) -> torch.Tensor:
+        """
+        xai_mode=False (default): 行為與原本相同（包 no_grad）
+        xai_mode=True           : 解 no_grad，允許梯度流（Grad-CAM 必要條件）
+        """
+        if xai_mode:
+            return self._forward_features(images)
+        with torch.no_grad():
+            return self._forward_features(images)
 
     def get_dire_visualization(self, images: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():

@@ -67,8 +67,14 @@ class FFTFeatureExtractor(nn.Module):
         feat = self.backbone(spec).flatten(1)  # (B, 512)
         return feat
 
-    def extract_features(self, images: torch.Tensor) -> torch.Tensor:
+    def extract_features(self, images: torch.Tensor, xai_mode: bool = False) -> torch.Tensor:
+        """
+        xai_mode=False (default): 與原本完全相同 — eval + no_grad
+        xai_mode=True           : 解 no_grad，允許梯度流（Grad-CAM 必要條件）
+        """
         self.eval()
+        if xai_mode:
+            return self.forward(images)
         with torch.no_grad():
             return self.forward(images)
 

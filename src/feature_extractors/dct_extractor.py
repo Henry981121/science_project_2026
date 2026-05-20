@@ -113,22 +113,29 @@ class DCTFeatureExtractor(nn.Module):
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         return self.extract_features(images)
 
-    def extract_features(self, images: torch.Tensor) -> torch.Tensor:
+    def _forward_features(self, images: torch.Tensor) -> torch.Tensor:
+        dct_map = self._compute_dct_map(images)
+        feat = self.feature_net(dct_map)  # (B, 512, 1, 1)
+        feat = feat.flatten(1)             # (B, 512)
+        feat = self.projection(feat)       # (B, feature_dim)
+        return feat
+
+    def extract_features(self, images: torch.Tensor, xai_mode: bool = False) -> torch.Tensor:
         """
         Extract DCT features.
 
         Args:
-            images: (B, 3, H, W) tensor, normalized [0,1] or standard ImageNet norm
+            images:   (B, 3, H, W) tensor
+            xai_mode: False (default) → 行為與原本相同（包 no_grad）
+                      True            → 解 no_grad，允許梯度流（Grad-CAM 必要條件）
 
         Returns:
             features: (B, feature_dim)
         """
+        if xai_mode:
+            return self._forward_features(images)
         with torch.no_grad():
-            dct_map = self._compute_dct_map(images)
-            feat = self.feature_net(dct_map)  # (B, 512, 1, 1)
-            feat = feat.flatten(1)             # (B, 512)
-            feat = self.projection(feat)       # (B, feature_dim)
-        return feat
+            return self._forward_features(images)
 
     def get_dct_visualization(self, images: torch.Tensor) -> torch.Tensor:
         """Return DCT map for visualization."""

@@ -75,14 +75,16 @@ class NoisePrintExtractor(nn.Module):
         self.register_buffer("srm_weight", srm_weight)
 
         # Lightweight CNN for noise features
+        # ReLU inplace=False：原本 inplace=True 會阻止 Grad-CAM hook 取得 activation
+        # （inplace 修改使 backward 拿不到 forward 時的 tensor），改 False 後每層多 ~50MB
         self.cnn = nn.Sequential(
-            nn.Conv2d(30, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(inplace=True),
+            nn.Conv2d(30, 64, 3, padding=1), nn.BatchNorm2d(64), nn.ReLU(inplace=False),
             nn.MaxPool2d(2),
-            nn.Conv2d(64, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(inplace=True),
+            nn.Conv2d(64, 128, 3, padding=1), nn.BatchNorm2d(128), nn.ReLU(inplace=False),
             nn.MaxPool2d(2),
-            nn.Conv2d(128, 256, 3, padding=1), nn.BatchNorm2d(256), nn.ReLU(inplace=True),
+            nn.Conv2d(128, 256, 3, padding=1), nn.BatchNorm2d(256), nn.ReLU(inplace=False),
             nn.MaxPool2d(2),
-            nn.Conv2d(256, 512, 3, padding=1), nn.BatchNorm2d(512), nn.ReLU(inplace=True),
+            nn.Conv2d(256, 512, 3, padding=1), nn.BatchNorm2d(512), nn.ReLU(inplace=False),
             nn.AdaptiveAvgPool2d((1, 1)),
         )
         self.fc = nn.Linear(512, self.OUT_DIM)
@@ -122,8 +124,14 @@ class NoisePrintExtractor(nn.Module):
         feat = self.fc(feat)                   # (B, 512)
         return feat
 
-    def extract_features(self, images: torch.Tensor) -> torch.Tensor:
+    def extract_features(self, images: torch.Tensor, xai_mode: bool = False) -> torch.Tensor:
+        """
+        xai_mode=False (default): 行為與原本相同 — eval + no_grad
+        xai_mode=True           : 解 no_grad，允許梯度流（Grad-CAM 必要條件）
+        """
         self.eval()
+        if xai_mode:
+            return self.forward(images)
         with torch.no_grad():
             return self.forward(images)
 

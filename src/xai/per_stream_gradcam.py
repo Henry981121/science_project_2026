@@ -2,15 +2,17 @@
 per_stream_gradcam.py
 ======================
 
-Day 1 模組 — 取代 src/xai/gradcam.py 裡那個沒在算梯度的 MultiStreamExplainer。
+取代 src/xai/gradcam.py 裡那個沒在算梯度的 MultiStreamExplainer。
 
 【做什麼】
 對一張測試圖，產生 5 條流各自的空間 attribution heatmap：
   - FFT/DCT/DIRE/Noise (CNN)  : 真正的 Grad-CAM (Selvaraju 2017)，
                                 target 為各 backbone 的最後 conv block，
                                 backward target 為該流自己的 EXP-A head 的 fake logit。
-  - CLIP (ViT)                : Day 1 暫時用 attention rollout (Abnar 2020)，
-                                Day 2-3 會升級成 Chefer relevance (CVPR 2021)。
+  - CLIP (ViT)                : Chefer relevance propagation (Chefer 2021 CVPR)，
+                                對 vision_model 每層 transformer block 抓 attention
+                                + gradient，套 layer-wise relevance propagation 公式
+                                逐層累積（class-specific 對 fake logit）。
 
 最終輸出 1×6 圖：原圖 | CLIP | FFT | DCT | DIRE | Noise
 
@@ -111,7 +113,138 @@ def find_target_layer(ext: nn.Module, name: str) -> Optional[nn.Module]:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 3. Per-stream explainer 主類
+# 3. Chefer CLIP relevance (Chefer 2021 CVPR)
+# ──────────────────────────────────────────────────────────────────────
+#
+# Chefer "Transformer Interpretability Beyond Attention Visualization"
+# eq. (13)-(14) class-specific relevance for ViT:
+#
+#   for each transformer block layer l:
+#       A_l    = attention weights         shape (B, H, S, S)
+#       g_l    = d(y_target) / d A_l       shape (B, H, S, S)
+#       cam_l  = ( g_l ⊙ A_l ).clamp(min=0).mean(dim=H)   # (B, S, S)
+#       R̄_l    = I + cam_l                                # row-normalize
+#       R      = R̄_l @ R                                  # accumulate
+#
+#   final relevance = R[:, 0, 1:].reshape(grid, grid)     # CLS row → patches
+#
+# 跟 attention rollout (Abnar 2020) 的差別：rollout 是 class-agnostic
+# 直接平均 attention；Chefer 用 gradient 對特定類別加權，且只取正貢獻。
+# ──────────────────────────────────────────────────────────────────────
+
+class CheferCLIPRelevance:
+    """
+    對 CLIP ViT 跑 class-specific relevance propagation。
+
+    用法：
+        chefer = CheferCLIPRelevance(clip_ext, clip_head, device='cuda')
+        relevance_map = chefer.compute(img_tensor)   # (grid, grid) in [0, 1]
+    """
+
+    def __init__(self, clip_ext: nn.Module, clip_head: nn.Module, device: str = 'cuda'):
+        self.clip_ext = clip_ext
+        self.clip_head = clip_head
+        self.device = device
+
+        # 找 vision_model 的 transformer layers
+        vision_model = clip_ext.clip_model.vision_model
+        if not hasattr(vision_model, 'encoder') or not hasattr(vision_model.encoder, 'layers'):
+            raise RuntimeError(
+                "CheferCLIPRelevance 預期 clip_ext.clip_model.vision_model.encoder.layers "
+                f"但實際結構是 {type(vision_model).__name__}"
+            )
+        self.layers = vision_model.encoder.layers
+        self._attentions: List[torch.Tensor] = []
+        self._hooks: List = []
+
+    # ── hook：抓 self_attn 的 attention weights ──────────────────────
+    def _save_attn_hook(self, module, inputs, outputs):
+        """
+        CLIPAttention forward 在 output_attentions=True 時回傳
+        (attn_output, attn_weights[, ...])，其中 attn_weights shape (B, H, S, S)。
+        """
+        if outputs is None or len(outputs) < 2:
+            return
+        attn = outputs[1]
+        if attn is None:
+            return
+        # 中間 tensor 預設不存 grad，要顯式 retain
+        attn.retain_grad()
+        self._attentions.append(attn)
+
+    def _attach_hooks(self):
+        self._attentions = []
+        self._hooks = [
+            layer.self_attn.register_forward_hook(self._save_attn_hook)
+            for layer in self.layers
+        ]
+
+    def _detach_hooks(self):
+        for h in self._hooks:
+            h.remove()
+        self._hooks = []
+
+    # ── 主流程 ──────────────────────────────────────────────────────
+    def compute(self, img_tensor: torch.Tensor) -> Optional[np.ndarray]:
+        """
+        Args:
+            img_tensor: (1, 3, 224, 224) ImageNet-normalized，已 .to(device)
+        Returns:
+            relevance heatmap (grid, grid) in [0, 1]，失敗回 None
+        """
+        # CLIP backbone frozen，但我們要對 attention 中間 tensor 取梯度，
+        # 所以 head 必須 requires_grad（提供 backward 起點）
+        for p in self.clip_head.parameters():
+            p.requires_grad_(True)
+        self.clip_ext.eval()
+        self.clip_head.eval()
+
+        self._attach_hooks()
+        try:
+            # 跑 forward 時開 output_attentions=True，hook 才會被觸發
+            feats, _ = self.clip_ext._forward_xai(img_tensor, output_attentions=True)
+            logits = self.clip_head(feats)
+            fake_logit = logits[0, 1]
+
+            self.clip_head.zero_grad()
+            # CLIP backbone 凍結沒梯度，但 attention 中間 tensor 仍有 grad
+            fake_logit.backward()
+
+            if not self._attentions:
+                print("[CheferCLIPRelevance] 沒抓到任何 attention，CLIPAttention "
+                      "結構可能與預期不同")
+                return None
+
+            # ── relevance propagation ──
+            first = self._attentions[0]
+            B, _, S, _ = first.shape
+            R = torch.eye(S, device=self.device).unsqueeze(0).expand(B, -1, -1).clone()
+
+            for attn in self._attentions:
+                if attn.grad is None:
+                    continue
+                # attn / grad shape: (B, H, S, S)
+                cam_layer = (attn.grad * attn).clamp(min=0).mean(dim=1)  # (B, S, S)
+                eye = torch.eye(S, device=self.device).unsqueeze(0).expand(B, -1, -1)
+                R_bar = eye + cam_layer
+                R_bar = R_bar / R_bar.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+                R = torch.bmm(R_bar, R)
+
+            # CLS row → patches（跳過 CLS 自己）
+            cls_row = R[0, 0, 1:].detach().cpu().numpy()
+            n = cls_row.shape[0]
+            grid = int(np.sqrt(n))
+            if grid * grid != n:
+                print(f"[CheferCLIPRelevance] patch 數 {n} 不是完全平方")
+                return None
+            m = cls_row.reshape(grid, grid)
+            return (m - m.min()) / (m.max() - m.min() + 1e-8)
+        finally:
+            self._detach_hooks()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 4. Per-stream explainer 主類
 # ──────────────────────────────────────────────────────────────────────
 
 class PerStreamExplainer:
@@ -141,6 +274,16 @@ class PerStreamExplainer:
         self.heads = heads
         self.device = device
 
+        # Chefer CLIP relevance — 只在 CLIP extractor + head 都齊備時建
+        self._chefer: Optional[CheferCLIPRelevance] = None
+        if 'clip' in extractors and 'clip' in heads:
+            try:
+                self._chefer = CheferCLIPRelevance(
+                    extractors['clip'], heads['clip'], device=device,
+                )
+            except Exception as e:
+                print(f"[PerStreamExplainer] CheferCLIPRelevance init 失敗: {e}")
+
     # ── 核心：對一張圖跑 5 條流 ─────────────────────────────────────────
     def explain_image(self, img_tensor: torch.Tensor) -> Dict[str, np.ndarray]:
         """
@@ -164,14 +307,14 @@ class PerStreamExplainer:
             except Exception as e:
                 print(f"[PerStreamExplainer] {s} Grad-CAM failed: {e}")
 
-        # ─── 2. CLIP：attention rollout（Day 2-3 換 Chefer）───
-        if 'clip' in self.extractors:
+        # ─── 2. CLIP：Chefer relevance propagation ───
+        if self._chefer is not None:
             try:
-                clip_map = self._clip_rollout(img_tensor)
+                clip_map = self._chefer.compute(img_tensor)
                 if clip_map is not None:
                     result['clip'] = clip_map
             except Exception as e:
-                print(f"[PerStreamExplainer] CLIP rollout failed: {e}")
+                print(f"[PerStreamExplainer] CLIP Chefer relevance failed: {e}")
 
         return result
 
@@ -213,26 +356,6 @@ class PerStreamExplainer:
             hook.remove()
 
         return cam
-
-    # ── CLIP attention rollout（Day 1 暫用，Day 2-3 換 Chefer）─────────
-    def _clip_rollout(self, img_tensor: torch.Tensor) -> Optional[np.ndarray]:
-        clip_ext = self.extractors['clip']
-        if not hasattr(clip_ext, 'get_attention_rollout'):
-            print("[PerStreamExplainer] CLIP extractor 沒有 get_attention_rollout()")
-            return None
-
-        with torch.no_grad():
-            rollout = clip_ext.get_attention_rollout(img_tensor)
-        # rollout 預期 shape (1, N_patches)
-        r = rollout[0].detach().cpu().numpy()
-        n = r.shape[0]
-        grid = int(np.sqrt(n))
-        if grid * grid != n:
-            print(f"[PerStreamExplainer] CLIP rollout 不是方形 patch grid (n={n})")
-            return None
-        r_map = r.reshape(grid, grid)
-        r_map = (r_map - r_map.min()) / (r_map.max() - r_map.min() + 1e-8)
-        return r_map
 
     # ── 視覺化：1×6 對照圖 ──────────────────────────────────────────────
     def visualize(

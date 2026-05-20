@@ -2,8 +2,11 @@
 day1_test.py
 =============
 
-Day 1 整合測試 — 在改 ai_detector_demo.py 之前，先用這支 script
-獨立驗證 PerStreamExplainer 對單張圖能不能正常產出 6 格 Grad-CAM 圖。
+PerStreamExplainer 整合測試 — 在 demo 化之前，先用這支 script 獨立
+驗證對單張圖能不能正常產出 6 格圖（原圖 + 5 條流）。
+
+【Day 2 起 CLIP 已升級為 Chefer relevance】
+這支 script 不需要任何修改，PerStreamExplainer 內部自動使用 Chefer。
 
 【怎麼用】
 從專案 root 跑：
@@ -17,7 +20,9 @@ Day 1 整合測試 — 在改 ai_detector_demo.py 之前，先用這支 script
 【會做什麼】
 1. 載入 5 條 extractor (跟 demo 一樣的程式碼路徑)
 2. 載入 5 個 EXP-A 訓出的 head
-3. 對指定圖片跑 PerStreamExplainer
+3. 對指定圖片跑 PerStreamExplainer：
+     - FFT/DCT/DIRE/Noise: Grad-CAM (Selvaraju 2017)
+     - CLIP:               Chefer relevance (Chefer 2021 CVPR)
 4. 存出 1×6 對照圖 (預設 day1_output.png)
 5. 印出每條流的 heatmap 統計 (shape、min、max、有效流數)
 
@@ -25,19 +30,15 @@ Day 1 整合測試 — 在改 ai_detector_demo.py 之前，先用這支 script
 - 應該看到 6 格圖：原圖 + 5 條流的 heatmap
 - 控制台應該印出每條流的形狀和強度
 - 如果某條流 print "skip" / "failed"，看 traceback，常見原因：
-    * extractor 沒有 xai_mode 參數 → 確認 pre-flight A 的修改有套用
     * EXP-A head 找不到 → 確認 outputs/exp_a/{stream}/best_model.pth 存在
+    * CheferCLIPRelevance init failed → 檢查 transformers 版本，
+      CLIPAttention 結構可能不同
     * CUDA OOM → 改用 --device cpu
 
 【預期視覺結果（管理期待）】
 根據 pre-flight B，CLIP 主導 47-57% attention。
-Day 1 跑出來的圖預期會是 "CLIP 那格訊號最強，其他四格相對淡"。
+跑出來的圖預期會是 "CLIP 那格訊號最強，其他四格相對淡"。
 這不是 bug — 是模型實際分工。
-
-【下一步】
-此 script 跑通且圖長得合理 → 進 Day 2-3 (CLIP 換成 Chefer relevance)
-                              並把舊 demo 裡的獨立 ResNet50 移除、
-                              改用 PerStreamExplainer。
 """
 
 import argparse

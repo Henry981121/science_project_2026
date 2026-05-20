@@ -52,8 +52,37 @@ class CLIPFeatureExtractor(nn.Module):
             raw = self.clip_model.vision_model(**inputs).pooler_output  # (B,1024)
         return self.proj(raw)  # (B,512)
 
-    def extract_features(self, images: torch.Tensor) -> torch.Tensor:
+    def _forward_xai(self, images: torch.Tensor, output_attentions: bool = False):
+        """
+        XAI 專用 forward。**不包 no_grad**，允許 backward 到 attention map。
+        clip_model 本身仍 frozen（params requires_grad=False），但中間 tensor 仍可取梯度。
+
+        Args:
+            images:            (B, 3, H, W)
+            output_attentions: True 時額外回傳 attention list（給 Chefer relevance 用）
+
+        Returns:
+            feats (B, 512)                                      若 output_attentions=False
+            (feats, attentions: tuple of (B, H, S, S) per layer) 若 output_attentions=True
+        """
+        inputs = self._preprocess(images)
+        outputs = self.clip_model.vision_model(**inputs, output_attentions=output_attentions)
+        feats = self.proj(outputs.pooler_output)  # (B, 512)
+        if output_attentions:
+            return feats, outputs.attentions
+        return feats
+
+    def extract_features(self, images: torch.Tensor, xai_mode: bool = False) -> torch.Tensor:
+        """
+        xai_mode=False (default): 行為與原本完全相同 — eval + no_grad
+        xai_mode=True           : 解 no_grad，允許梯度流（Chefer relevance 必要條件）
+
+        注意：CLIP backbone 仍 frozen，xai_mode=True 只解 no_grad 包裝，
+        不會讓 CLIP 參數開始訓練。
+        """
         self.eval()
+        if xai_mode:
+            return self._forward_xai(images, output_attentions=False)
         with torch.no_grad():
             return self.forward(images)
 
