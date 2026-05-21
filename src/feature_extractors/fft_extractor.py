@@ -42,7 +42,7 @@ class FFTFeatureExtractor(nn.Module):
         for b in range(B):
             channels = []
             for c in range(C):
-                ch = images[b, c].cpu().numpy()
+                ch = images[b, c].detach().cpu().numpy()
                 fft = np.fft.fft2(ch)
                 fft_shifted = np.fft.fftshift(fft)
                 mag = np.log1p(np.abs(fft_shifted))

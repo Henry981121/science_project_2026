@@ -175,7 +175,7 @@ def main():
     for s in STREAMS:
         if s in exps:
             m = exps[s]
-            print(f"  {STREAM_DISPLAY[s]:5s}  shape={tuple(m.shape):20s}  "
+            print(f"  {STREAM_DISPLAY[s]:5s}  shape={str(tuple(m.shape)):20s}  "
                   f"min={m.min():.3f}  max={m.max():.3f}  mean={m.mean():.3f}")
         else:
             print(f"  {STREAM_DISPLAY[s]:5s}  MISSING")

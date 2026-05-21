@@ -18,7 +18,12 @@ class CLIPFeatureExtractor(nn.Module):
         super().__init__()
         self.device = device
         print(f"[CLIP] Loading {self.MODEL_NAME} ...")
-        self.clip_model = CLIPModel.from_pretrained(self.MODEL_NAME)
+        # attn_implementation="eager" 為必要：現代 transformers 預設 SDPA，
+        # 在 SDPA 下 output_attentions=True 會靜默回傳 None，Chefer relevance
+        # 與 attention rollout 都會整個失效。
+        self.clip_model = CLIPModel.from_pretrained(
+            self.MODEL_NAME, attn_implementation="eager"
+        )
         self.processor  = CLIPProcessor.from_pretrained(self.MODEL_NAME)
         for param in self.clip_model.parameters():
             param.requires_grad = False
@@ -40,7 +45,7 @@ class CLIPFeatureExtractor(nn.Module):
         mean = torch.tensor([0.485,0.456,0.406], device=images.device).view(1,3,1,1)
         std  = torch.tensor([0.229,0.224,0.225], device=images.device).view(1,3,1,1)
         imgs_01 = torch.clamp(images * std + mean, 0, 1)
-        return [Image.fromarray((img.permute(1,2,0).cpu().numpy()*255).astype("uint8")) for img in imgs_01]
+        return [Image.fromarray((img.detach().permute(1,2,0).cpu().numpy()*255).astype("uint8")) for img in imgs_01]
 
     def _preprocess(self, images):
         inputs = self.processor(images=self._to_pil(images), return_tensors="pt", padding=True)
