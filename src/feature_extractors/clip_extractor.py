@@ -71,6 +71,12 @@ class CLIPFeatureExtractor(nn.Module):
             (feats, attentions: tuple of (B, H, S, S) per layer) 若 output_attentions=True
         """
         inputs = self._preprocess(images)
+        # CLIP backbone 全 frozen，若 pixel_values 也不帶梯度，vision_model 內
+        # 所有中間 tensor（含 attention weights）的 requires_grad 都會是 False，
+        # backward 到不了 attention map，Chefer relevance 整個失效。
+        # 讓輸入帶梯度即可把所有 activation 拉進 autograd 圖（參數仍 frozen）。
+        if "pixel_values" in inputs:
+            inputs["pixel_values"] = inputs["pixel_values"].requires_grad_(True)
         outputs = self.clip_model.vision_model(**inputs, output_attentions=output_attentions)
         feats = self.proj(outputs.pooler_output)  # (B, 512)
         if output_attentions:

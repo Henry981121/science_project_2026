@@ -33,7 +33,7 @@ import torch.nn.functional as F
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 
 
 STREAMS = ['clip', 'fft', 'dct', 'dire', 'noise']
@@ -146,43 +146,14 @@ class CheferCLIPRelevance:
         self.clip_head = clip_head
         self.device = device
 
-        # 找 vision_model 的 transformer layers
+        # 早期結構檢查：確認 vision_model 是預期的 encoder.layers 結構，
+        # 不符就在 PerStreamExplainer init 階段直接 fail（fail fast）。
         vision_model = clip_ext.clip_model.vision_model
         if not hasattr(vision_model, 'encoder') or not hasattr(vision_model.encoder, 'layers'):
             raise RuntimeError(
                 "CheferCLIPRelevance 預期 clip_ext.clip_model.vision_model.encoder.layers "
                 f"但實際結構是 {type(vision_model).__name__}"
             )
-        self.layers = vision_model.encoder.layers
-        self._attentions: List[torch.Tensor] = []
-        self._hooks: List = []
-
-    # ── hook：抓 self_attn 的 attention weights ──────────────────────
-    def _save_attn_hook(self, module, inputs, outputs):
-        """
-        CLIPAttention forward 在 output_attentions=True 時回傳
-        (attn_output, attn_weights[, ...])，其中 attn_weights shape (B, H, S, S)。
-        """
-        if outputs is None or len(outputs) < 2:
-            return
-        attn = outputs[1]
-        if attn is None:
-            return
-        # 中間 tensor 預設不存 grad，要顯式 retain
-        attn.retain_grad()
-        self._attentions.append(attn)
-
-    def _attach_hooks(self):
-        self._attentions = []
-        self._hooks = [
-            layer.self_attn.register_forward_hook(self._save_attn_hook)
-            for layer in self.layers
-        ]
-
-    def _detach_hooks(self):
-        for h in self._hooks:
-            h.remove()
-        self._hooks = []
 
     # ── 主流程 ──────────────────────────────────────────────────────
     def compute(self, img_tensor: torch.Tensor) -> Optional[np.ndarray]:
@@ -199,48 +170,60 @@ class CheferCLIPRelevance:
         self.clip_ext.eval()
         self.clip_head.eval()
 
-        self._attach_hooks()
-        try:
-            # 跑 forward 時開 output_attentions=True，hook 才會被觸發
-            feats, _ = self.clip_ext._forward_xai(img_tensor, output_attentions=True)
-            logits = self.clip_head(feats)
-            fake_logit = logits[0, 1]
+        # 直接用 _forward_xai 回傳的官方 outputs.attentions（每層一個
+        # (B, H, S, S) tensor）。不再對 self_attn 掛 forward hook —— 後者
+        # 依賴 CLIPAttention 的回傳結構，transformers 一升級就可能壞。
+        # _forward_xai 已開 output_attentions=True 並讓 pixel_values 帶梯度。
+        feats, attentions = self.clip_ext._forward_xai(img_tensor, output_attentions=True)
+        if not attentions:
+            print("[CheferCLIPRelevance] _forward_xai 沒回傳 attention —— "
+                  "確認 CLIP 是以 attn_implementation='eager' 載入。")
+            return None
 
-            self.clip_head.zero_grad()
-            # CLIP backbone 凍結沒梯度，但 attention 中間 tensor 仍有 grad
-            fake_logit.backward()
+        # 中間 tensor 預設不存 grad，backward 前要逐層 retain_grad
+        for attn in attentions:
+            if attn.requires_grad:
+                attn.retain_grad()
 
-            if not self._attentions:
-                print("[CheferCLIPRelevance] 沒抓到任何 attention，CLIPAttention "
-                      "結構可能與預期不同")
-                return None
+        logits = self.clip_head(feats)
+        fake_logit = logits[0, 1]
+        self.clip_head.zero_grad()
+        # CLIP backbone 凍結沒梯度，但 attention 中間 tensor 仍有 grad
+        fake_logit.backward()
 
-            # ── relevance propagation ──
-            first = self._attentions[0]
-            B, _, S, _ = first.shape
-            R = torch.eye(S, device=self.device).unsqueeze(0).expand(B, -1, -1).clone()
+        # ── relevance propagation ──
+        B, _, S, _ = attentions[0].shape
+        R = torch.eye(S, device=self.device).unsqueeze(0).expand(B, -1, -1).clone()
 
-            for attn in self._attentions:
-                if attn.grad is None:
-                    continue
-                # attn / grad shape: (B, H, S, S)
-                cam_layer = (attn.grad * attn).clamp(min=0).mean(dim=1)  # (B, S, S)
-                eye = torch.eye(S, device=self.device).unsqueeze(0).expand(B, -1, -1)
-                R_bar = eye + cam_layer
-                R_bar = R_bar / R_bar.sum(dim=-1, keepdim=True).clamp(min=1e-8)
-                R = torch.bmm(R_bar, R)
+        n_used = 0
+        for attn in attentions:
+            if attn.grad is None:
+                continue
+            n_used += 1
+            # attn / grad shape: (B, H, S, S)
+            cam_layer = (attn.grad * attn).clamp(min=0).mean(dim=1)  # (B, S, S)
+            eye = torch.eye(S, device=self.device).unsqueeze(0).expand(B, -1, -1)
+            R_bar = eye + cam_layer
+            R_bar = R_bar / R_bar.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+            R = torch.bmm(R_bar, R)
 
-            # CLS row → patches（跳過 CLS 自己）
-            cls_row = R[0, 0, 1:].detach().cpu().numpy()
-            n = cls_row.shape[0]
-            grid = int(np.sqrt(n))
-            if grid * grid != n:
-                print(f"[CheferCLIPRelevance] patch 數 {n} 不是完全平方")
-                return None
-            m = cls_row.reshape(grid, grid)
-            return (m - m.min()) / (m.max() - m.min() + 1e-8)
-        finally:
-            self._detach_hooks()
+        # 所有層 grad 都是 None → 梯度沒回流到 attention，R 還是單位矩陣，
+        # 此時硬算只會得到一張全 0 的假 heatmap。明確失敗比回傳空圖好。
+        if n_used == 0:
+            print("[CheferCLIPRelevance] 所有 attention 層的 grad 全為 None — "
+                  "梯度沒回流到 attention map。檢查 _forward_xai 是否讓 "
+                  "pixel_values.requires_grad_(True)。")
+            return None
+
+        # CLS row → patches（跳過 CLS 自己）
+        cls_row = R[0, 0, 1:].detach().cpu().numpy()
+        n = cls_row.shape[0]
+        grid = int(np.sqrt(n))
+        if grid * grid != n:
+            print(f"[CheferCLIPRelevance] patch 數 {n} 不是完全平方")
+            return None
+        m = cls_row.reshape(grid, grid)
+        return (m - m.min()) / (m.max() - m.min() + 1e-8)
 
 
 # ──────────────────────────────────────────────────────────────────────
