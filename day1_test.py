@@ -21,8 +21,9 @@ PerStreamExplainer 整合測試 — 在 demo 化之前，先用這支 script 獨
 1. 載入 5 條 extractor (跟 demo 一樣的程式碼路徑)
 2. 載入 5 個 EXP-A 訓出的 head
 3. 對指定圖片跑 PerStreamExplainer：
-     - FFT/DCT/DIRE/Noise: Grad-CAM (Selvaraju 2017)
-     - CLIP:               Chefer relevance (Chefer 2021 CVPR)
+     - FFT/DCT/DIRE: Grad-CAM (Selvaraju 2017)
+     - CLIP:         Chefer relevance (Chefer 2021 CVPR)
+     - Noise:        SRM 殘差圖（非 Grad-CAM；雜訊流無空間定位證據）
 4. 存出 1×6 對照圖 (預設 day1_output.png)
 5. 印出每條流的 heatmap 統計 (shape、min、max、有效流數)
 

@@ -5,14 +5,19 @@ per_stream_gradcam.py
 取代 src/xai/gradcam.py 裡那個沒在算梯度的 MultiStreamExplainer。
 
 【做什麼】
-對一張測試圖，產生 5 條流各自的空間 attribution heatmap：
-  - FFT/DCT/DIRE/Noise (CNN)  : 真正的 Grad-CAM (Selvaraju 2017)，
+對一張測試圖，產生 5 條流各自的空間視覺化：
+  - FFT/DCT/DIRE (CNN)        : 真正的 Grad-CAM (Selvaraju 2017)，
                                 target 為各 backbone 的最後 conv block，
                                 backward target 為該流自己的 EXP-A head 的 fake logit。
   - CLIP (ViT)                : Chefer relevance propagation (Chefer 2021 CVPR)，
                                 對 vision_model 每層 transformer block 抓 attention
                                 + gradient，套 layer-wise relevance propagation 公式
                                 逐層累積（class-specific 對 fake logit）。
+  - Noise                     : **不是 Grad-CAM**。SRM 雜訊殘差是全域統計紋理
+                                特徵，沒有可空間定位的決策證據，套 Grad-CAM 實測
+                                5/5 圖皆退化成空圖。改為視覺化該流的輸入表徵
+                                （30 個 SRM 高通濾波器的逐像素能量）。這是輸入域
+                                變換、model-agnostic，caption 一律標「SRM residual」。
 
 最終輸出 1×6 圖：原圖 | CLIP | FFT | DCT | DIRE | Noise
 
@@ -44,7 +49,8 @@ STREAM_DISPLAY = {
     'dire':  'DIRE',
     'noise': 'Noise',
 }
-CNN_STREAMS = ['fft', 'dct', 'dire', 'noise']
+# 走真 Grad-CAM 的流。Noise 不在此列 —— 見 PerStreamExplainer._noise_residual_map。
+CNN_STREAMS = ['fft', 'dct', 'dire']
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -94,14 +100,12 @@ def find_target_layer(ext: nn.Module, name: str) -> Optional[nn.Module]:
         fft   → ext.backbone     的最後 BasicBlock   (1, 512,  7, 7)
         dct   → ext.feature_net  的最後 BasicBlock   (1, 512,  7, 7)
         dire  → ext.feature_net  的最後 Bottleneck   (1, 2048, 7, 7)
-        noise → ext.cnn          的最後 ReLU         (1, 512, 28, 28)
+    Noise 流不走 Grad-CAM（見 PerStreamExplainer._noise_residual_map），不在此處理。
     """
     if name == 'fft':
         children = list(ext.backbone.children())
     elif name in ('dct', 'dire'):
         children = list(ext.feature_net.children())
-    elif name == 'noise':
-        children = list(ext.cnn.children())
     else:
         return None
 
@@ -278,7 +282,7 @@ class PerStreamExplainer:
         """
         result: Dict[str, np.ndarray] = {}
 
-        # ─── 1. CNN 四條流：真正的 Grad-CAM ───
+        # ─── 1. CNN 三條流（FFT/DCT/DIRE）：真正的 Grad-CAM ───
         for s in CNN_STREAMS:
             if s not in self.extractors or s not in self.heads:
                 print(f"[PerStreamExplainer] {s} missing extractor or head, skip")
@@ -298,6 +302,15 @@ class PerStreamExplainer:
                     result['clip'] = clip_map
             except Exception as e:
                 print(f"[PerStreamExplainer] CLIP Chefer relevance failed: {e}")
+
+        # ─── 3. Noise：SRM 殘差圖（非 Grad-CAM，見 _noise_residual_map）───
+        if 'noise' in self.extractors:
+            try:
+                noise_map = self._noise_residual_map(img_tensor)
+                if noise_map is not None:
+                    result['noise'] = noise_map
+            except Exception as e:
+                print(f"[PerStreamExplainer] noise SRM residual failed: {e}")
 
         return result
 
@@ -339,6 +352,31 @@ class PerStreamExplainer:
             hook.remove()
 
         return cam
+
+    # ── Noise 流：SRM 殘差圖（非 Grad-CAM）─────────────────────────────
+    def _noise_residual_map(self, img_tensor: torch.Tensor) -> Optional[np.ndarray]:
+        """
+        Noise 流的面板 —— **不是 Grad-CAM，也不是模型歸因**。
+
+        SRM 雜訊殘差是全域統計紋理特徵，沒有可空間定位的「模型決策證據」。
+        對它套 Grad-CAM 會退化成空圖（實測 5/5 圖：mean≈0.001，SDv5/MJ 連
+        max 都為 0）。改為直接視覺化 Noise 流的輸入表徵：30 個 SRM 高通
+        濾波器的逐像素能量。
+
+        ⚠️ 這是輸入域變換、model-agnostic。caption / 論文必須明確標為
+        「SRM residual」，不可當成 attribution —— 否則就是另一個假 Grad-CAM。
+        Noise 流的決策層級重要性由 Level 2（attention + ablation）承擔。
+        """
+        ext = self.extractors['noise']
+        if not hasattr(ext, 'get_noise_map'):
+            print("[PerStreamExplainer] noise extractor 無 get_noise_map()，skip")
+            return None
+        with torch.no_grad():
+            noise_map = ext.get_noise_map(img_tensor)   # (B, 30, H, W)
+        # 跨 30 個高通濾波器取逐像素能量
+        energy = noise_map.abs().mean(dim=1)[0]          # (H, W)
+        energy = energy.detach().cpu().numpy().astype(np.float32)
+        return (energy - energy.min()) / (energy.max() - energy.min() + 1e-8)
 
     # ── 視覺化：1×6 對照圖 ──────────────────────────────────────────────
     def visualize(
@@ -384,8 +422,14 @@ class PerStreamExplainer:
             overlay = (0.5 * colored + 0.5 * img_np).astype(np.uint8)
             ax.imshow(overlay)
 
-            # FFT/DCT 是頻域，caption 標清楚
-            suffix = ' (freq domain)' if s in ('fft', 'dct') else ''
+            # 各流面板方法不同，caption 標清楚：
+            #   FFT/DCT — 頻域 Grad-CAM；Noise — SRM 殘差（非歸因）
+            if s in ('fft', 'dct'):
+                suffix = ' (freq domain)'
+            elif s == 'noise':
+                suffix = ' (SRM residual)'
+            else:
+                suffix = ''
             ax.set_title(f'{STREAM_DISPLAY[s]}{suffix}', fontsize=10)
             ax.axis('off')
 
