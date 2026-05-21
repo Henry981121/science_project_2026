@@ -53,6 +53,9 @@ outputs/
 # Data (usually large / private)
 data/
 
+# 對話用暫存資料夾（截圖、隊友傳來的 CSV 等，內含他人本機路徑，不進版控）
+對話用*/
+
 # Logs
 *.log
 logs/
