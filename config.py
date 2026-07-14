@@ -12,10 +12,10 @@ BASE_DIR = Path(__file__).parent.resolve()
 # 如果你的 data/ 和 outputs/ 不在同一個目錄，可以分開設定：
 # BASE_DIR = Path('/your/custom/path')
 
-# ── 衍生路徑（通常不需要修改）────────────────────────────────────────────
-DATA_DIR       = BASE_DIR / 'data'
+# ── 衍生路徑（已調整指向既有訓練輸出）─────────────────────────────────
+DATA_DIR       = Path(r'C:\Users\harry\OneDrive\Desktop\data')
 SPLITS_DIR     = DATA_DIR / 'splits'
-OUTPUTS_DIR    = BASE_DIR / 'outputs'
+OUTPUTS_DIR    = Path(r'C:\Users\harry\OneDrive\Desktop\outputs\3.22output')
 FEAT_CACHE_DIR = OUTPUTS_DIR / 'exp_a' / 'features'
 
 # CSV splits
