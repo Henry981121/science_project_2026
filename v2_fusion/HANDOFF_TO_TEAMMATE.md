@@ -1,6 +1,72 @@
 # 融合層可以開跑了（v2_fusion）
 
-commit `9c9b070`，記得先 `git pull`（分支 `exp`）。
+## 先更新程式碼
+
+分支 `exp`。關鍵的那個 commit 是 **`9c9b070`**（後面可能還有更新的，都一起拉下來就對了）。
+
+```powershell
+cd <專案根目錄>          # 有 .git 的那層，不是 handoff 資料夾
+
+# 1. 看看自己在哪個分支、有沒有還沒存的改動
+git status
+
+# 2. 如果 git status 顯示有修改過的檔案（紅字的 modified），先收起來
+#    沒有的話跳過這步
+git stash push -m "pull 之前先收起來"
+
+# 3. 抓下來
+git fetch origin
+git checkout exp          # 如果本來就在 exp 會顯示 "Already on 'exp'"
+git pull origin exp
+
+# 4. 確認拿到了 —— 這行要找得到東西
+git log --oneline | Select-String 9c9b070
+
+# 5. 如果第 2 步有 stash，現在放回來
+git stash pop
+```
+
+第 4 步應該印出：
+
+```
+9c9b070 v2_fusion: 移除 GRL，改接 dct/clip/dinov2 handoff cache
+```
+
+沒印出任何東西就是沒拉到，別往下走。
+
+<details>
+<summary>如果 pull 卡住</summary>
+
+**`Your local changes ... would be overwritten by merge`**
+你本機改過同樣的檔案。先看是哪些：
+
+```powershell
+git status
+```
+
+如果是 `v2_fusion/` 裡的檔案、而且你沒有特意改過它們
+（很可能只是跑過之後產生的差異），丟掉本機版本即可：
+
+```powershell
+git checkout -- v2_fusion/
+git pull origin exp
+```
+
+**`CONFLICT (content): Merge conflict in ...`**
+兩邊都改了同一個地方。想全部採用遠端的版本：
+
+```powershell
+git checkout --theirs v2_fusion/
+git add v2_fusion/
+git commit
+```
+
+（`--theirs` 只有在這個 conflict 狀態下才有效，平常用會報錯。）
+
+**其他情況**：先把 `git status` 的輸出貼回來，不要硬解 —— 解錯會把東西弄丟。
+</details>
+
+---
 
 ## 改了什麼
 
