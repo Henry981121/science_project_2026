@@ -6,83 +6,95 @@ v2_fusion.config — 所有超參數的唯一來源
   2. 存進 results.json 的 config 是「這個 dataclass 的實際內容」，
      不是手寫字串 —— 所以結果檔不可能記錄到沒有發生的事。
 
-舊版的病：
-  s3_main_grl.py:18  docstring 說 lambda_src=0
-  s3_main_grl.py:221 GRLLoss 預設值 0.0
-  s3_main_grl.py:62  實際傳入 0.1   ← 只有這個生效
-  s3_main_grl.py:578 結果檔寫死 "curriculum: easy->medium->hard"，但 curriculum 根本停用
+2026-08-27 變更
+---------------
+* **GRL 移除。** 不再有 gradient reversal、gen discriminator、lambda_grl。
+  原本保留 GRL 是為了做「λ 只乘一次」的乾淨對照（audit 發現 05）；
+  既然方向上不採用 domain adaptation，那條路徑連同它的 λ 一起刪掉，
+  而不是留著預設 0 —— 留著就還有人會去設它。
+* **特徵流換成 dct / clip / dinov2**，維度直接是 backbone 原生輸出，
+  不再經過任何隨機初始化的投影層（audit 發現 01 因此消失）。
+* **source 類別空間只含 train 裡實際出現的 generator**，
+  cross_generator_test 專屬的 generator 標為 -1 並被 ignore_index 吃掉 ——
+  不製造永遠收不到樣本的死輸出（audit 發現 08 的同一個病）。
 """
 
 from dataclasses import dataclass, field, asdict
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 
 # ══════════════════════════════════════════════════════════════════════
 # Generator 標籤表
 # ══════════════════════════════════════════════════════════════════════
+#
+# source head 的類別空間 = train/val 裡實際出現的 10 種 source。
+# 這是刻意的：把只出現在 cross_generator_test 的 generator 也編進來的話，
+# 那些類別在訓練時永遠收不到樣本，就是 audit 發現 08 的死輸出。
 
-GENERATOR_TO_ID: Dict[str, int] = {
-    'adm':            0,
-    'glide':          1,
-    'sdv4':           2,
-    'sdv5':           3,
-    'midjourney':     4,
-    'wildfake':       5,
-    'biggan':         6,
-    'vqdm':           7,
-    'wukong':         8,
-    'firefly':        9,
-    'real':          10,
-    'real_extra':    11,
-    'wildfake_ddim': 12,
-    'wildfake_other':13,
-    'stylegan':      14,
-    'dcgan':         15,
-    'dcgan_unseen':  16,
-    'fursona_gan':   17,
-    'waifu_gan':     18,
-}
+TRAIN_GENERATORS: List[str] = [
+    'real',        # 0
+    'real_extra',  # 1
+    'adm',         # 2
+    'glide',       # 3
+    'sdv4',        # 4
+    'sdv5',        # 5
+    'midjourney',  # 6
+    'wildfake',    # 7
+    'stylegan',    # 8
+    'dcgan',       # 9
+]
 
-# 真圖的 source id。這兩個要從 generator discriminator 的類別空間排除。
+# 只出現在 cross_generator_test。它們是合法名稱（不該 raise），
+# 但沒有 source 標籤 —— source id 填 -1，CE 的 ignore_index 會吃掉。
+EVAL_ONLY_GENERATORS: List[str] = [
+    'wildfake_ddim',
+    'wildfake_other',
+    'dcgan_unseen',
+    'fursona_gan',
+    'waifu_gan',
+]
+
+GENERATOR_TO_ID: Dict[str, int] = {n: i for i, n in enumerate(TRAIN_GENERATORS)}
+SOURCE_ID_TO_NAME: Dict[int, str] = {i: n for n, i in GENERATOR_TO_ID.items()}
+
+KNOWN_GENERATORS: frozenset = frozenset(TRAIN_GENERATORS) | frozenset(EVAL_ONLY_GENERATORS)
+
+# 真圖。這兩個名字是 source head 的類別，但 binary label 為 0。
 REAL_GENERATOR_NAMES: List[str] = ['real', 'real_extra']
 REAL_IDS = frozenset(GENERATOR_TO_ID[n] for n in REAL_GENERATOR_NAMES)
 
-# 假圖 generator 的「連續」類別空間。
-# 對應 audit 發現 08：舊版用 torch.clamp(gen_ids, 0, N_GEN-1) 當 remap，
-# 那是截斷不是排除 —— class 10/11 變成永遠收不到樣本的死輸出，
-# 而 id 17/18 被壓成 16，跟 dcgan_unseen 共用標籤。
-# 這裡改成明確的字典映射，一對一，不可能撞號。
-FAKE_GENERATOR_NAMES: List[str] = [
-    n for n in GENERATOR_TO_ID if n not in REAL_GENERATOR_NAMES
-]
-SOURCE_ID_TO_GEN_ID: Dict[int, int] = {
-    GENERATOR_TO_ID[name]: i for i, name in enumerate(FAKE_GENERATOR_NAMES)
-}
-GEN_ID_TO_NAME: Dict[int, str] = {
-    i: name for i, name in enumerate(FAKE_GENERATOR_NAMES)
-}
+SOURCE_IGNORE_INDEX = -1
 
-N_SOURCES = len(GENERATOR_TO_ID)          # 19
-N_GEN     = len(FAKE_GENERATOR_NAMES)     # 17
+N_SOURCES = len(TRAIN_GENERATORS)   # 10
 N_BINARY  = 2
 
-STREAMS: List[str] = ['clip', 'fft', 'dct', 'dire', 'noise']
 
-# 每條流在 cache 裡的輸入維度。
+# ══════════════════════════════════════════════════════════════════════
+# 特徵流
+# ══════════════════════════════════════════════════════════════════════
 #
-# LEGACY（目前隊友機器上的 3.22 cache）：五條都已經被 extractor 內部的
-#   投影層壓成 512 —— 但那些投影層是隨機初始化且從未訓練（audit 發現 01），
-#   CLIP 丟掉的那一半資訊已經不在檔案裡，模型端救不回來。
+# 2026-08-26 handoff（handoff_dct_clip_dinov2_20260826）。
+# 這些維度是各 backbone 的原生輸出，不是被隨機投影壓過的結果：
+#   dct     192  = 64 個頻率位置 × 3 個統計量（手工特徵，無 CNN）
+#   clip    768  = CLIP ViT-L/14 的 image embedding（CLIP 自己訓練好的 visual
+#                  projection 輸出，不是我們加的隨機層）
+#   dinov2  1024 = DINOv2 ViT-L/14 的 CLS token
 #
-# RAW（隊友下次重抽特徵時改存的）：存 projection 之前的原始維度，
-#   投影層搬進本模型當可訓練的 StreamAdapter（audit 發現 16）。
-#   同樣的 backbone、同樣的流、同樣的抽取時間，cache 約大 1.6 倍。
-STREAM_DIMS_LEGACY: Dict[str, int] = {
-    'clip': 512, 'fft': 512, 'dct': 512, 'dire': 512, 'noise': 512,
+# StreamAdapter 的 Linear(in_dim → d_model) 就是唯一的降維層，而它是被訓練的。
+
+STREAMS: List[str] = ['dct', 'clip', 'dinov2']
+
+STREAM_DIMS: Dict[str, int] = {
+    'dct':    192,
+    'clip':   768,
+    'dinov2': 1024,
 }
-STREAM_DIMS_RAW: Dict[str, int] = {
-    'clip': 1024, 'fft': 512, 'dct': 512, 'dire': 2048, 'noise': 512,
-}
+
+# cache 佈局（handoff package）：
+#   {cache}/{stream}/{split}.npy         (N, dim)  float32
+#   {cache}/{stream}/{split}.valid.npy   (N,)      bool
+#   {cache}/index_{split}.csv            欄位 row,path,generator,is_real,split,valid_all
+SPLITS: List[str] = ['train', 'val', 'cross_generator_test']
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -92,8 +104,7 @@ STREAM_DIMS_RAW: Dict[str, int] = {
 @dataclass
 class ModelConfig:
     streams: List[str] = field(default_factory=lambda: list(STREAMS))
-    stream_dims: Dict[str, int] = field(
-        default_factory=lambda: dict(STREAM_DIMS_LEGACY))
+    stream_dims: Dict[str, int] = field(default_factory=lambda: dict(STREAM_DIMS))
 
     d_model: int = 512
     n_heads: int = 8
@@ -108,38 +119,22 @@ class ModelConfig:
     # 加法式 embedding 強得多；這個 embedding 是輔助，保留可調。
     stream_embed_std: float = 0.02
 
+    # source head：預測「是哪個 source」的 auxiliary head，正常梯度。
+    # 這不是 GRL —— GRL 已移除。預設關閉（LossConfig.lambda_src = 0）。
+    use_source_head: bool = True
+
     n_sources: int = N_SOURCES
-    n_gen: int = N_GEN
     n_binary: int = N_BINARY
 
 
 @dataclass
 class LossConfig:
     """
-    Total = CE_binary
-          + lambda_src * CE_source          (作用在 shared 上，正常梯度)
-          + 1.0        * CE_gen             (經過 GRL，梯度已被反轉並乘上 -lambda_grl)
+    Total = CE_binary + lambda_src * CE_source
 
-    lambda_grl 只出現在 GradientReversal 裡，一次。
-    這裡的 gen loss 權重固定 1.0，不可設定 —— 就是為了讓 λ 不可能被乘第二次。
-    對應 audit 發現 05：舊版 λ 同時進了 GRL 的 backward 和 loss 權重，
-    backbone 實收 λ² = 0.00198，比反方向的 λ_src=0.1 弱 50.6 倍。
+    沒有 lambda_grl，也沒有 gen loss —— GRL 整條路徑已從模型移除。
     """
     lambda_src: float = 0.0    # 預設關掉。舊版是「意外」開在 0.1 的。
-    lambda_grl: float = 0.0    # 預設關掉。要開請顯式指定。
-
-    grl_schedule: str = 'progressive'   # 'progressive' | 'constant'
-    grl_gamma: float = 10.0
-
-    def grl_lambda_at(self, epoch: int, total_epochs: int) -> float:
-        """Ganin et al. 2015 的 progressive schedule。"""
-        if self.lambda_grl == 0.0:
-            return 0.0
-        if self.grl_schedule == 'constant':
-            return self.lambda_grl
-        import math
-        progress = epoch / max(total_epochs - 1, 1)
-        return self.lambda_grl * (2.0 / (1.0 + math.exp(-self.grl_gamma * progress)) - 1.0)
 
 
 @dataclass
@@ -171,27 +166,18 @@ class RunConfig:
 # 對照實驗 preset
 # ══════════════════════════════════════════════════════════════════════
 #
-# audit 發現 05 指出：先前「GRL 效益 ≈ 0」的結論不成立，因為 GRL 從來沒真的開過。
-# 這四組是唯一能回答「GRL 到底有沒有用」的乾淨對照 —— 只差 λ，其餘完全相同。
-# 在 cached features 上每組約 6 分鐘。
+# GRL 移除後只剩一個 λ 可調：source head 的權重。
+# 這兩組回答「多任務 auxiliary supervision 有沒有幫助」，只差 λ_src。
 
 def build_presets() -> Dict[str, RunConfig]:
     presets: Dict[str, RunConfig] = {}
     for lam_src in (0.0, 0.1):
-        for lam_grl in (0.0, 0.05):
-            src_tag = f"src{lam_src:g}".replace('.', 'p')
-            grl_tag = f"grl{lam_grl:g}".replace('.', 'p')
-            name = f"{src_tag}_{grl_tag}"
-            presets[name] = RunConfig(
-                name=name,
-                loss=LossConfig(lambda_src=lam_src, lambda_grl=lam_grl),
-            )
+        name = f"src{lam_src:g}".replace('.', 'p')
+        presets[name] = RunConfig(name=name, loss=LossConfig(lambda_src=lam_src))
     return presets
 
 
 PRESET_NOTES = {
-    'src0_grl0':     '乾淨 baseline —— 只有 CE_binary，沒有任何輔助 head',
-    'src0_grl0p05':  'GRL 的真實效益 —— 唯一沒有反向抵消的對抗設定',
-    'src0p1_grl0':   'source head 單獨的效益',
-    'src0p1_grl0p05':'舊模型的設定（但 λ 只乘一次，所以 GRL 真的有開）',
+    'src0':   '乾淨 baseline —— 只有 CE_binary，沒有任何輔助 head',
+    'src0p1': '加上 source auxiliary head（正常梯度，非對抗）',
 }

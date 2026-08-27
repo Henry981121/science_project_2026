@@ -20,13 +20,20 @@ v2_fusion.model — 融合架構
       │    可學習的 fusion token 去「問」五條流                    (audit 發現 13、15)
       ▼
   (B, d) shared
-      ├─ head_binary       → (B, 2)      正常梯度
-      ├─ head_source       → (B, 19)     正常梯度，乘 lambda_src
-      └─ GRL → head_gen    → (B, 17)     梯度反轉，強度 lambda_grl（只在這裡出現一次）
+      ├─ head_binary       → (B, 2)      真/假，正常梯度
+      └─ head_source       → (B, 10)     哪個 source，正常梯度，乘 lambda_src
+                                          （auxiliary，預設 lambda_src=0 關閉）
 
-為什麼不做「CLIP 當 query、其餘四條當 key/value」的 cross-attention：
+2026-08-27：GRL 已移除
+----------------------
+原本這裡還有第三條 `GRL → head_gen` 的對抗分支。方向上不採用 domain
+adaptation 之後，整條路徑連同 lambda_grl 一起刪除，而不是留著預設 0 ——
+留著就還有人會去設它，也還要在論文裡解釋一個沒有使用的模組。
+`head_source` 不是 GRL：它是正常梯度的 auxiliary head，兩者不要混為一談。
+
+為什麼不做「CLIP 當 query、其餘當 key/value」的 cross-attention：
 那等於在架構裡寫死「CLIP 是主、其餘是輔」。支持這個假設的證據
-（ablation CLIP 0.30 最高）本身是被污染的 —— 其他三條流是隨機投影／隨機 CNN。
+（舊版 ablation CLIP 0.30 最高）本身是被污染的 —— 當時其他流是隨機投影／隨機 CNN。
 用「CLIP 最重要」去 justify 把 CLIP 設為 query，是循環論證。
 可學習的 fusion token 不預設任何一條流為主，由資料決定。
 """
@@ -38,39 +45,6 @@ import torch
 import torch.nn as nn
 
 from .config import ModelConfig
-
-
-# ══════════════════════════════════════════════════════════════════════
-# Gradient Reversal
-# ══════════════════════════════════════════════════════════════════════
-
-class _GradientReversal(torch.autograd.Function):
-    """Forward 恆等；backward 乘上 -lambda_。"""
-
-    @staticmethod
-    def forward(ctx, x: torch.Tensor, lambda_: float):
-        ctx.lambda_ = float(lambda_)
-        return x.view_as(x)
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):
-        return -ctx.lambda_ * grad_output, None
-
-
-def grad_reverse(x: torch.Tensor, lambda_: float) -> torch.Tensor:
-    """
-    ⚠️ lambda_ 只准在這裡出現一次。
-
-    對應 audit 發現 05：舊版 s3_main_grl.py 把同一個 λ 同時給了
-      :203  grad_reverse(shared, grl_lambda)      → backward × -λ
-      :257  current_lambda_grl * loss_gen         → loss 權重 × λ
-    結果 backbone 實收 λ²。標準 DANN（Ganin 2015）是二選一，不是兩個都放。
-    v2 選「GRL 帶 -λ、loss 權重固定 1.0」：
-      · discriminator 以全強度訓練 → 是個有能力的對手
-      · backbone 收到 -λ           → 對抗強度就是 λ 本身
-    LossConfig 沒有 gen loss 的權重欄位，所以 λ 不可能被乘第二次。
-    """
-    return _GradientReversal.apply(x, lambda_)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -200,13 +174,10 @@ class FusionDetectorV2(nn.Module):
 
         self.head_drop = nn.Dropout(cfg.dropout_head)
         self.head_binary = nn.Linear(d, cfg.n_binary)
-        self.head_source = nn.Linear(d, cfg.n_sources)
-        self.head_gen = nn.Sequential(
-            nn.Linear(d, d // 2),
-            nn.GELU(),
-            nn.Dropout(cfg.dropout_head),
-            nn.Linear(d // 2, cfg.n_gen),
-        )
+        # auxiliary，非對抗。use_source_head=False 時連參數都不建立，
+        # 這樣 lambda_src 設了也不會有「有頭但沒梯度」的模糊狀態。
+        self.head_source = (
+            nn.Linear(d, cfg.n_sources) if cfg.use_source_head else None)
 
     # ── 輸入 ──────────────────────────────────────────────────────────
     def _to_tokens(self, feats: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -216,15 +187,8 @@ class FusionDetectorV2(nn.Module):
         toks = [self.adapters[s](feats[s]) for s in self.streams]
         return torch.stack(toks, dim=1) + self.stream_embed   # (B, N, d)
 
-    def forward(
-        self,
-        feats: Dict[str, torch.Tensor],
-        grl_lambda: float = 0.0,
-    ) -> Dict[str, torch.Tensor]:
-        """
-        feats:      {stream_name: (B, in_dim)}
-        grl_lambda: 當前 epoch 的 GRL 強度。λ 只在這裡進入模型一次。
-        """
+    def forward(self, feats: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """feats: {stream_name: (B, in_dim)}"""
         tokens = self._to_tokens(feats)
 
         self_attn_w = None
@@ -236,12 +200,12 @@ class FusionDetectorV2(nn.Module):
 
         out = {
             'logits_binary': self.head_binary(h),
-            'logits_source': self.head_source(h),
-            'logits_gen':    self.head_gen(grad_reverse(h, grl_lambda)),
             'shared':        shared,
             'readout_attn':  readout_attn,   # (B, N) —— XAI 直接用這個
             'self_attn':     self_attn_w,    # (B, N, N)
         }
+        if self.head_source is not None:
+            out['logits_source'] = self.head_source(h)
         return out
 
     # ── 便利方法 ──────────────────────────────────────────────────────
@@ -252,7 +216,8 @@ class FusionDetectorV2(nn.Module):
             'adapters':  count(self.adapters),
             'self_attn': count(self.layers),
             'readout':   count(self.readout) + self.stream_embed.numel(),
-            'heads':     count(self.head_binary) + count(self.head_source) + count(self.head_gen),
+            'heads':     count(self.head_binary) + (
+                count(self.head_source) if self.head_source is not None else 0),
             'total':     sum(p.numel() for p in self.parameters() if p.requires_grad),
         }
 
