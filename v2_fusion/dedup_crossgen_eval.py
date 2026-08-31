@@ -39,6 +39,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
@@ -48,15 +49,51 @@ from .model import FusionDetectorV2
 from .train import evaluate
 
 
-def inspect_duplicates(bundle, streams):
-    """檢查重複 path 的各列：欄位是否一致、特徵是否逐位元相同。"""
+def survey_splits(cache_dir):
+    """掃每個 split 的 index CSV，看各自內部有沒有重複 path。
+
+    cross_generator_test 有 5,732 筆重複是查出來的，但 train / val 有沒有
+    同樣的問題從來沒人看過。如果有，val 的指標會被同一張圖重複計分扭曲，
+    而 val 正是拿來選 checkpoint 的那個 split。
+
+    只讀 CSV、不載入特徵，幾秒鐘。locked test 一律跳過。
+    """
+    out = {}
+    for csv_path in sorted(Path(cache_dir).glob('index_*.csv')):
+        split = csv_path.stem.replace('index_', '')
+        if split == 'test':
+            continue
+        d = pd.read_csv(csv_path)
+        key = d['path'].astype(str).str.lower()
+        extra = key.duplicated(keep='first').to_numpy()
+        is_real = d['is_real'].to_numpy()
+        out[split] = {
+            'n_rows': int(len(d)),
+            'n_unique_path': int(key.nunique()),
+            'n_duplicate_rows': int(extra.sum()),
+            'duplicate_rows_real_side': int((extra & (is_real == 1)).sum()),
+            'duplicate_rows_fake_side': int((extra & (is_real == 0)).sum()),
+        }
+    return out
+
+
+def inspect_duplicates(bundle, streams, tol):
+    """檢查重複 path 的各列：欄位是否一致、特徵是否數值等價。
+
+    判準不是 bitwise identical。同一張圖跑兩次前向，GPU 的 reduction 順序
+    不保證一致，float32 會有 ULP 級別的差異（值域 ±10 時約 1e-6）。那是
+    數值噪音，不是不同的圖。真的是不同 crop 的話，CLIP embedding 的差異
+    在 1e-2 以上 —— 中間隔了四個數量級，tol=1e-4 兩邊都留足安全邊界。
+    """
     df = bundle['df'].reset_index(drop=True)
     key = df['path'].astype(str).str.lower()
     # groupby().indices 一次拿到所有位置；逐 key 過濾是 O(組數 × 列數)，會慢好幾分鐘
     groups = {k: idx for k, idx in df.groupby(key, sort=False).indices.items()
               if len(idx) > 1}
 
-    field_conflicts, feature_diffs = [], []
+    field_conflicts, noise, exceeding = [], [], []
+    n_identical = 0
+    worst = 0.0
     for k, idx in groups.items():
         rows = df.iloc[idx]
         if rows['is_real'].nunique() > 1 or rows['generator'].nunique() > 1:
@@ -64,14 +101,19 @@ def inspect_duplicates(bundle, streams):
                 'path': str(rows['path'].iloc[0]), 'rows': idx.tolist(),
                 'is_real': rows['is_real'].unique().tolist(),
                 'generator': rows['generator'].unique().tolist()})
+        gmax, gstream = 0.0, None
         for s in streams:
             block = bundle['feats'][s][idx]
-            if not torch.equal(block, block[:1].expand_as(block)):
-                feature_diffs.append({
-                    'path': str(rows['path'].iloc[0]), 'stream': s,
-                    'rows': idx.tolist(),
-                    'max_abs_diff': float((block - block[:1]).abs().max())})
-                break
+            d = float((block - block[:1]).abs().max())
+            if d > gmax:
+                gmax, gstream = d, s
+        worst = max(worst, gmax)
+        if gmax == 0.0:
+            n_identical += 1
+        else:
+            rec = {'path': str(rows['path'].iloc[0]), 'stream': gstream,
+                   'rows': idx.tolist(), 'max_abs_diff': gmax}
+            (exceeding if gmax > tol else noise).append(rec)
 
     is_real = df['is_real'].to_numpy()
     dup_extra = (~key.duplicated(keep='first')).to_numpy()
@@ -84,9 +126,15 @@ def inspect_duplicates(bundle, streams):
         'duplicate_rows_fake_side': int(((~dup_extra) & (is_real == 0)).sum()),
         'field_conflicts': field_conflicts[:20],
         'n_field_conflicts': len(field_conflicts),
-        'feature_diffs': feature_diffs[:20],
-        'n_feature_diffs': len(feature_diffs),
-        'duplicates_are_identical': len(feature_diffs) == 0,
+        'feature_tol': tol,
+        'n_bitwise_identical': n_identical,
+        'n_numeric_noise': len(noise),
+        'numeric_noise_examples': sorted(
+            noise, key=lambda r: -r['max_abs_diff'])[:10],
+        'feature_diffs_exceeding_tol': exceeding[:20],
+        'n_exceeding_tol': len(exceeding),
+        'max_abs_diff_overall': worst,
+        'duplicates_are_equivalent': len(exceeding) == 0,
     }
 
 
@@ -133,15 +181,28 @@ def main():
     ap.add_argument('--out', required=True)
     ap.add_argument('--split', default='cross_generator_test')
     ap.add_argument('--batch-size', type=int, default=256)
+    ap.add_argument('--feature-tol', type=float, default=1e-4,
+                    help='重複列的特徵差異容忍上限。ULP 級的浮點噪音（~1e-6）'
+                         '視為同一張圖；不同 crop 會落在 1e-2 以上')
     ap.add_argument('--force', action='store_true',
-                    help='重複列的特徵不同時仍照常去重評分（預設拒絕）')
+                    help='特徵差異超過 tol 時仍照常去重評分（預設拒絕）')
     args = ap.parse_args()
 
     streams = list(STREAMS)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    survey = survey_splits(Path(args.cache_dir))
+    print('各 split 的內部重複（只讀 CSV）：')
+    for sp, s in survey.items():
+        print(f"  {sp:24s} rows={s['n_rows']:>7,}  unique={s['n_unique_path']:>7,}"
+              f"  dup={s['n_duplicate_rows']:>6,}"
+              f"  (real {s['duplicate_rows_real_side']:,} /"
+              f" fake {s['duplicate_rows_fake_side']:,})")
+    print()
+
     bundle = load_split(Path(args.cache_dir), args.split, streams, drop_invalid=True)
 
-    diag = inspect_duplicates(bundle, streams)
+    diag = inspect_duplicates(bundle, streams, args.feature_tol)
     print(json.dumps(diag, indent=2, ensure_ascii=False))
 
     if diag['n_field_conflicts']:
@@ -150,12 +211,13 @@ def main():
             f"（{diag['n_field_conflicts']} 組）。這是資料錯誤，不是重複，"
             f"必須先查清楚，不去重也不評分。")
 
-    if not diag['duplicates_are_identical'] and not args.force:
+    if not diag['duplicates_are_equivalent'] and not args.force:
         raise SystemExit(
-            f"\n有 {diag['n_feature_diffs']} 組重複 path 的特徵並不相同。\n"
-            f"這表示它們不是 CSV 重複，而是同一張圖的多個版本（cache 名稱帶 crop）。\n"
+            f"\n有 {diag['n_exceeding_tol']} 組重複 path 的特徵差異超過 "
+            f"{args.feature_tol}（最大 {diag['max_abs_diff_overall']:.3e}）。\n"
+            f"這個量級不是浮點噪音，比較像同一張圖的不同 crop。\n"
             f"去重會丟掉有效資料，改用 image-level 聚合才對。\n"
-            f"沒有產生任何指標 —— 把上面的 feature_diffs 貼回來再決定。")
+            f"沒有產生任何指標 —— 把 feature_diffs_exceeding_tol 貼回來再決定。")
 
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     model = FusionDetectorV2(ModelConfig(**checkpoint['run_config']['model'])).to(device)
@@ -177,6 +239,7 @@ def main():
         'experiment': 'cross_generator_test_dedup_in_cache_coordinates',
         'split': args.split,
         'checkpoint': str(Path(args.checkpoint)),
+        'split_duplicate_survey': survey,
         'diagnosis': diag,
         'class_balance': {'with_duplicates': balance(bundle),
                           'deduplicated': balance(deduped)},
