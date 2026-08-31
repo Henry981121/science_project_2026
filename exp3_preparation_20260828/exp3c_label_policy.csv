@@ -1,0 +1,2 @@
+allowed_content_labels,required_review_status,note
+portrait|landscape|building|animal|object|other,reviewed,Do not infer content from filename; fill from reliable labels or manual review.

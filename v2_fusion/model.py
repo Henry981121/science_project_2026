@@ -153,6 +153,8 @@ class FusionDetectorV2(nn.Module):
         self.streams: List[str] = list(cfg.streams)
         self.n_streams = len(self.streams)
         d = cfg.d_model
+        if cfg.fusion_mode not in {'hybrid', 'self', 'cross', 'concat'}:
+            raise ValueError(f"unknown fusion_mode: {cfg.fusion_mode}")
 
         missing = [s for s in self.streams if s not in cfg.stream_dims]
         if missing:
@@ -168,9 +170,14 @@ class FusionDetectorV2(nn.Module):
         self.layers = nn.ModuleList([
             StreamSelfAttention(d, cfg.n_heads, cfg.dropout_attn, cfg.ffn_mult)
             for _ in range(cfg.n_layers)
-        ])
+        ]) if cfg.fusion_mode in {'hybrid', 'self'} else nn.ModuleList()
 
-        self.readout = CrossAttentionReadout(d, cfg.n_heads, cfg.dropout_attn)
+        self.readout = (CrossAttentionReadout(d, cfg.n_heads, cfg.dropout_attn)
+                        if cfg.fusion_mode in {'hybrid', 'cross'} else None)
+        self.concat_head = (nn.Sequential(
+            nn.LayerNorm(self.n_streams * d), nn.Linear(self.n_streams * d, d),
+            nn.GELU(), nn.Dropout(cfg.dropout_attn))
+            if cfg.fusion_mode == 'concat' else None)
 
         self.head_drop = nn.Dropout(cfg.dropout_head)
         self.head_binary = nn.Linear(d, cfg.n_binary)
@@ -195,7 +202,18 @@ class FusionDetectorV2(nn.Module):
         for layer in self.layers:
             tokens, self_attn_w = layer(tokens)
 
-        shared, readout_attn = self.readout(tokens)
+        if self.cfg.fusion_mode in {'hybrid', 'cross'}:
+            shared, readout_attn = self.readout(tokens)
+        elif self.cfg.fusion_mode == 'self':
+            shared = tokens.mean(dim=1)
+            readout_attn = torch.full(
+                (tokens.shape[0], tokens.shape[1]), 1.0 / tokens.shape[1],
+                device=tokens.device, dtype=tokens.dtype)
+        else:
+            shared = self.concat_head(tokens.flatten(1))
+            readout_attn = torch.full(
+                (tokens.shape[0], tokens.shape[1]), 1.0 / tokens.shape[1],
+                device=tokens.device, dtype=tokens.dtype)
         h = self.head_drop(shared)
 
         out = {
@@ -215,7 +233,9 @@ class FusionDetectorV2(nn.Module):
         return {
             'adapters':  count(self.adapters),
             'self_attn': count(self.layers),
-            'readout':   count(self.readout) + self.stream_embed.numel(),
+            'readout':   (count(self.readout) if self.readout is not None else 0)
+                         + (count(self.concat_head) if self.concat_head is not None else 0)
+                         + self.stream_embed.numel(),
             'heads':     count(self.head_binary) + (
                 count(self.head_source) if self.head_source is not None else 0),
             'total':     sum(p.numel() for p in self.parameters() if p.requires_grad),
@@ -227,7 +247,7 @@ class FusionDetectorV2(nn.Module):
         return (
             f"FusionDetectorV2\n"
             f"  streams   : {self.n_streams} ({dims}) -> d_model={self.cfg.d_model}\n"
-            f"  fusion    : {self.cfg.n_layers}x StreamSelfAttention + CrossAttentionReadout\n"
+            f"  fusion    : {self.cfg.fusion_mode}\n"
             f"  params    : adapters {p['adapters']:,} | self-attn {p['self_attn']:,} | "
             f"readout {p['readout']:,} | heads {p['heads']:,}\n"
             f"  total     : {p['total']:,}"

@@ -119,6 +119,9 @@ class ModelConfig:
     # 加法式 embedding 強得多；這個 embedding 是輔助，保留可調。
     stream_embed_std: float = 0.02
 
+    # EXP2A: keep input streams fixed while changing only the fusion module.
+    fusion_mode: str = 'hybrid'  # hybrid, self, cross, concat
+
     # source head：預測「是哪個 source」的 auxiliary head，正常梯度。
     # 這不是 GRL —— GRL 已移除。預設關閉（LossConfig.lambda_src = 0）。
     use_source_head: bool = True

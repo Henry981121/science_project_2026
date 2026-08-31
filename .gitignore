@@ -49,6 +49,17 @@ outputs/
 *.ckpt
 *.pkl
 *.h5
+*.bin
+
+# External SOTA source repositories and downloaded/generated artifacts
+exp3f_sota_models_20260829/*/backbones/
+exp3f_sota_models_20260829/*/checkpoints/
+exp3f_sota_models_20260829/*/pretrained_weights/
+exp3f_sota_models_20260829/*/logs/
+
+# Generated EXP3 preparation tables and feature smoke-test artifacts
+exp3_preparation_20260828/exp3d_*.csv
+exp3_preparation_20260828/exp3d_*/
 
 # Data (usually large / private)
 data/
