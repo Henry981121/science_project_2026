@@ -1,0 +1,41 @@
+{
+  "experiment": "EXP3F_same_data_retrain_20260830",
+  "manifest_dir": "outputs/exp3f_same_data_retrain_20260830/manifests",
+  "models": {
+    "aide": {
+      "source_dir": "exp3f_sota_models_20260829/AIDE",
+      "input_size": 256,
+      "batch_size_initial": 2,
+      "gradient_accumulation": 16,
+      "backbone_policy": "official initialization, fine-tune official AIDE topology"
+    },
+    "dda": {
+      "source_dir": "exp3f_sota_models_20260829/DDA",
+      "input_size": 336,
+      "batch_size_initial": 1,
+      "gradient_accumulation": 16,
+      "backbone_policy": "official DINOv2 ViT-L/14 with official DDA LoRA policy"
+    },
+    "univfd": {
+      "source_dir": "exp3f_sota_models_20260829/UnivFD",
+      "input_size": 224,
+      "batch_size_initial": 16,
+      "gradient_accumulation": 1,
+      "backbone_policy": "official CLIP ViT-L/14 with UnivFD linear-head policy"
+    },
+    "ferretnet": {
+      "source_dir": "exp3f_sota_models_20260829/FerretNet",
+      "input_size": 256,
+      "batch_size_initial": 8,
+      "gradient_accumulation": 1,
+      "backbone_policy": "official FerretNet training architecture"
+    }
+  },
+  "selection": {
+    "checkpoint_selection_split": "val",
+    "threshold_selection_split": "val",
+    "locked_test_used": false,
+    "test_used_for_selection": false,
+    "seed": 20260830
+  }
+}

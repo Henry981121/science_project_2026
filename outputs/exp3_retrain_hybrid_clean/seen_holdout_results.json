@@ -1,0 +1,22 @@
+{
+  "experiment": "EXP3B_seen_generator_holdout",
+  "checkpoint": "C:\\Users\\harry\\OneDrive\\Desktop\\science_project_v3\\science_project_2026_exp\\outputs\\exp3_retrain_hybrid_clean\\best_model.pth",
+  "holdout_manifest": "C:\\Users\\harry\\OneDrive\\Desktop\\science_project_v3\\exp3_data\\seen_generator_holdout\\seen_generator_holdout.csv",
+  "n": 10920,
+  "device": "cuda",
+  "metrics": {
+    "acc": 99.24908424908425,
+    "auc": 0.9995334853068832,
+    "f1": 0.9915689903351841,
+    "fnr": 0.9245942058763098,
+    "fpr": 0.6112671402610276,
+    "readout_attn": {
+      "dct": 0.4129487872123718,
+      "clip": 0.335074782371521,
+      "dinov2": 0.25197634100914
+    }
+  },
+  "locked_test_used": false,
+  "train_holdout_overlap": 0,
+  "note": "The checkpoint was retrained using train_excluding_seen_holdout.csv."
+}

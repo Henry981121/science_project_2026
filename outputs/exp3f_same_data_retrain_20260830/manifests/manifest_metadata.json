@@ -1,0 +1,68 @@
+{
+  "experiment": "EXP3F_same_data_retrain",
+  "created_by": "prepare_same_data_retrain.py",
+  "train_n": 98273,
+  "val_n": 23438,
+  "cross_generator_test_n": 28729,
+  "cross_generator_test_source_n": 34461,
+  "cross_generator_test_duplicates_removed": 5732,
+  "cross_generator_test_split_overlap_removed": 0,
+  "seen_generator_holdout_n": 10920,
+  "labels": {
+    "train": {
+      "1": 43799,
+      "0": 54474
+    },
+    "val": {
+      "1": 10455,
+      "0": 12983
+    },
+    "cross_generator_test": {
+      "1": 17298,
+      "0": 11431
+    }
+  },
+  "generator_counts": {
+    "train": {
+      "adm": 6266,
+      "real": 43764,
+      "midjourney": 6304,
+      "wildfake": 6251,
+      "glide": 6187,
+      "sdv5": 6261,
+      "real_extra": 10710,
+      "sdv4": 6260,
+      "dcgan": 2205,
+      "stylegan": 4065
+    },
+    "val": {
+      "midjourney": 1504,
+      "wildfake": 1514,
+      "real": 10433,
+      "stylegan": 966,
+      "adm": 1488,
+      "real_extra": 2550,
+      "dcgan": 525,
+      "glide": 1475,
+      "sdv4": 1490,
+      "sdv5": 1493
+    },
+    "cross_generator_test": {
+      "fursona_gan": 2798,
+      "real": 9170,
+      "wildfake_ddim": 5000,
+      "wildfake_other": 5000,
+      "real_extra": 2261,
+      "waifu_gan": 3000,
+      "dcgan_unseen": 1500
+    }
+  },
+  "locked_test_used": false,
+  "train_holdout_overlap": 0,
+  "source_sha256": {
+    "train": "cb9323f0ab8ef0c09afe31f77368b888132c1212b2e09236bda689188425b2dd",
+    "val": "fde01254d80c8b5bbc18fa073c7ccb9603ab09199988869b296c633fcbaef92e",
+    "cross": "256802f518779e411944ab19f3973bfaf31d56c7cb3fdf40d5a1d6fab9701ba3",
+    "holdout": "a40038b8a4a6041f5fc10a1084b08459a5d1fb5852f3201faab81096e3113647"
+  }
+}
