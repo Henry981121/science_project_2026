@@ -31,6 +31,8 @@ from .config import (
 )
 from .model import FusionDetectorV2
 from .losses import FusionLoss
+from .fusion_cells import (all_cell_ids, is_grid_cell, spec_from_cell_id,
+                           fit_width_to_budget, CellSpec, FusionCell)
 
 PASS, FAIL = "  \033[32mPASS\033[0m", "  \033[31mFAIL\033[0m"
 _results = []
@@ -279,6 +281,145 @@ def test_param_budget():
     check("參數量在合理範圍", True)
 
 
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 三軸因子設計（fusion_cells.py）
+# ══════════════════════════════════════════════════════════════════════
+#
+# 這一段存在的理由：EXP2A 加 fusion_mode 時 sanity 沒有跟著更新，
+# 結果 fusion_mode='cross' 那條路徑從來沒有被執行過。同一個錯誤不要犯第二次 ——
+# 每個新增的 cell 都必須被這裡的 forward + 梯度檢查走過一遍。
+
+def test_fusion_cells_forward():
+    B = 16
+    bad_shape, bad_sum, unlearned = [], [], []
+    for cid in all_cell_ids():
+        cfg = ModelConfig(fusion_cell=cid, cell_budget=200_000)
+        model = FusionDetectorV2(cfg)
+        feats, _, _ = _fake_batch(cfg, B)
+        out = model(feats)
+        if tuple(out['logits_binary'].shape) != (B, 2):
+            bad_shape.append(f"{cid}: {tuple(out['logits_binary'].shape)}")
+        if tuple(out['readout_attn'].shape) != (B, len(cfg.streams)):
+            bad_shape.append(f"{cid} attn: {tuple(out['readout_attn'].shape)}")
+        if not torch.allclose(out['readout_attn'].sum(-1), torch.ones(B), atol=1e-5):
+            bad_sum.append(cid)
+        if not is_grid_cell(cid) and out['readout_attn_learned']:
+            unlearned.append(cid)
+
+    check(f"{len(all_cell_ids())} 個 cell 全部 forward 成功且 shape 正確",
+          not bad_shape, "\n".join(bad_shape))
+    check("每個 cell 的 stream 權重每列和為 1（是凸組合，B 軸沒有夾帶副作用）",
+          not bad_sum, ", ".join(bad_sum))
+    check("參照組 concat 被標記為 readout_attn_learned=False（1/N 是硬填的）",
+          not unlearned, ", ".join(unlearned))
+
+
+def test_fusion_cells_gradients():
+    """每個 cell 的每一個參數都要收到梯度。沒收到就是有死分支。"""
+    dead_all = []
+    for cid in all_cell_ids():
+        cfg = ModelConfig(fusion_cell=cid, cell_budget=200_000)
+        model = FusionDetectorV2(cfg)
+        feats, y_bin, y_src = _fake_batch(cfg, 32)
+        out = model(feats)
+        loss, _ = FusionLoss(LossConfig(lambda_src=0.1))(out, y_bin, y_src)
+        loss.backward()
+        dead = [n for n, prm in model.named_parameters()
+                if prm.requires_grad and (prm.grad is None or prm.grad.abs().sum() == 0)]
+        if dead:
+            dead_all.append(f"{cid}: {dead[:4]}")
+    check("每個 cell 的梯度流到所有可訓練參數（沒有死分支）",
+          not dead_all, "\n".join(dead_all))
+
+
+def test_order2_is_superset_of_order1():
+    """
+    A 軸必須只切換一件事：交互項在不在。
+
+    order=2 是 order=1 的嚴格超集 —— interact_scale=0 時，交互模組的權重
+    再怎麼變動都不能影響輸出。這條不成立的話，A 軸就夾帶了別的變化，
+    「二階比較好」就無法歸因到交互項。
+    """
+    bad = []
+    for level in ('feature', 'decision'):
+        cell = FusionCell(CellSpec(2, 'static', level, 32), 3, 512)
+        tokens = torch.randn(8, 3, 512)
+        with torch.no_grad():
+            cell.interact_scale.fill_(0.0)
+            before = cell(tokens)['logits_binary'].clone()
+            for prm in cell.interaction.parameters():
+                prm.add_(torch.randn_like(prm) * 5.0)
+            after = cell(tokens)['logits_binary']
+        if not torch.allclose(before, after, atol=1e-6):
+            bad.append(f"{level}: max diff {(before - after).abs().max():.2e}")
+    check("interact_scale=0 時二階完全退化成一階（A 軸真的只變一件事）",
+          not bad, "\n".join(bad))
+
+
+def test_capacity_matching():
+    """
+    沒有容量對齊，「哪一格比較好」就無法解讀 —— 八格的天生大小差六個數量級。
+    這裡驗證二分搜尋確實把所有 cell 拉到同一個預算內。
+    """
+    worst = 0.0
+    detail = []
+    for budget in (50_000, 200_000, 800_000):
+        got = {}
+        for cid in all_cell_ids():
+            cfg = ModelConfig(fusion_cell=cid, cell_budget=budget)
+            n = FusionDetectorV2(cfg).n_parameters()['fusion']
+            got[cid] = n
+            worst = max(worst, abs(n - budget) / budget)
+        spread = (max(got.values()) - min(got.values())) / budget
+        detail.append(f"budget {budget:>8,}: 落點 {min(got.values()):,}-"
+                      f"{max(got.values()):,}（相對離散 {100*spread:.1f}%）")
+    check("所有 cell 的融合模組參數量都對齊到預算的 5% 以內",
+          worst <= 0.05, "\n".join(detail) + f"\n最差偏離 {100*worst:.1f}%")
+
+
+def test_gating_actually_varies():
+    """
+    B 軸的整個意義就是「權重會不會隨樣本變」。
+    static 必須逐樣本相同，gated 必須不同 —— 否則 B 軸是空的。
+    """
+    tokens = torch.randn(64, 3, 512) * torch.tensor([[[1.0]], [[5.0]]])[:1]
+    stds = {}
+    for weighting in ('static', 'gated'):
+        cell = FusionCell(CellSpec(1, weighting, 'feature', 64), 3, 512)
+        cell.eval()
+        with torch.no_grad():
+            stds[weighting] = float(cell(tokens)['stream_weight'].std(0).mean())
+    check("static 的權重逐樣本完全相同（std=0）",
+          stds['static'] < 1e-7, f"static std = {stds['static']:.2e}")
+    check("gated 的權重逐樣本會變（否則 B 軸是空的）",
+          stds['gated'] > 1e-4,
+          f"gated std = {stds['gated']:.2e}（未訓練的初值，只驗證機制通了）")
+
+
+def test_single_stream_rejects_order2():
+    """一條流沒有交互項可言。靜默降級成一階會讓 results.json 記錄到沒發生的事。"""
+    ok = False
+    try:
+        FusionCell(CellSpec(2, 'static', 'feature', 32), n_streams=1, d_model=512)
+    except ValueError:
+        ok = True
+    check("單流 + order=2 會 raise（不靜默降級成一階）", ok)
+
+
+def test_legacy_path_unchanged():
+    """
+    現有結果必須仍然可重現。fusion_cell=None 時模型要跟加這個功能之前
+    完全一樣 —— 8,391,052 是 2026-08-31 那批結果的模型大小。
+    """
+    n = FusionDetectorV2(ModelConfig()).n_parameters()['total']
+    check("legacy 路徑（fusion_cell=None）參數量仍是 8,391,052",
+          n == 8_391_052, f"實際 {n:,}")
+
+
+# ══════════════════════════════════════════════════════════════════════
+
 def main() -> int:
     print("=" * 72)
     print("v2_fusion — 靜態驗證（不需要 GPU、不需要資料）")
@@ -292,6 +433,15 @@ def main() -> int:
     test_layernorm_handles_scale()
     test_single_batch_overfit()
     test_param_budget()
+
+    print("\n--- 三軸因子設計（fusion_cells）---")
+    test_fusion_cells_forward()
+    test_fusion_cells_gradients()
+    test_order2_is_superset_of_order1()
+    test_capacity_matching()
+    test_gating_actually_varies()
+    test_single_stream_rejects_order2()
+    test_legacy_path_unchanged()
 
     n_pass = sum(1 for _, ok in _results if ok)
     n_all = len(_results)

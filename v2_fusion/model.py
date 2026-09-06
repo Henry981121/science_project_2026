@@ -45,6 +45,8 @@ import torch
 import torch.nn as nn
 
 from .config import ModelConfig
+from .fusion_cells import (build_cell, spec_from_cell_id, fit_width_to_budget,
+                           STREAM_WEIGHT_IS_LEARNED)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -153,7 +155,8 @@ class FusionDetectorV2(nn.Module):
         self.streams: List[str] = list(cfg.streams)
         self.n_streams = len(self.streams)
         d = cfg.d_model
-        if cfg.fusion_mode not in {'hybrid', 'self', 'cross', 'concat'}:
+        self.use_cell = cfg.fusion_cell is not None
+        if not self.use_cell and cfg.fusion_mode not in {'hybrid', 'self', 'cross', 'concat'}:
             raise ValueError(f"unknown fusion_mode: {cfg.fusion_mode}")
 
         missing = [s for s in self.streams if s not in cfg.stream_dims]
@@ -167,24 +170,61 @@ class FusionDetectorV2(nn.Module):
         self.stream_embed = nn.Parameter(
             torch.randn(1, self.n_streams, d) * cfg.stream_embed_std)
 
+        # ── 三軸因子設計路徑 ──────────────────────────────────────────
+        # cell 自己擁有 binary head（decision-level 的頭在各流上、
+        # feature-level 的在融合後 —— 頭放在 cell 外面，C 軸就不只變一件事）。
+        if self.use_cell:
+            width = cfg.cell_width
+            if cfg.cell_budget is not None:
+                width, _ = fit_width_to_budget(
+                    cfg.fusion_cell,
+                    spec_from_cell_id(cfg.fusion_cell, width),
+                    self.n_streams, d, cfg.cell_budget, cfg.n_binary)
+            self.cell = build_cell(
+                cfg.fusion_cell, spec_from_cell_id(cfg.fusion_cell, width),
+                self.n_streams, d, cfg.n_binary,
+                dropout=cfg.dropout_attn, head_dropout=cfg.dropout_head)
+            self.cell_width = width
+            # 把實際生效的值寫回 config，results.json 才會記錄到**真正發生的事**。
+            # 不寫回的話，budget 反推出來的 width 是 192，config 裡卻永遠是預設的
+            # 64 —— 那就是 audit 抓過的「結果檔記錄到沒發生的事」同一個病。
+            cfg.cell_width = width
+            cfg.cell_params = self.cell.n_parameters()
+        else:
+            self.cell = None
+            self.cell_width = None
+
         self.layers = nn.ModuleList([
             StreamSelfAttention(d, cfg.n_heads, cfg.dropout_attn, cfg.ffn_mult)
             for _ in range(cfg.n_layers)
-        ]) if cfg.fusion_mode in {'hybrid', 'self'} else nn.ModuleList()
+        ]) if (not self.use_cell and cfg.fusion_mode in {'hybrid', 'self'}) else nn.ModuleList()
 
         self.readout = (CrossAttentionReadout(d, cfg.n_heads, cfg.dropout_attn)
-                        if cfg.fusion_mode in {'hybrid', 'cross'} else None)
+                        if (not self.use_cell and cfg.fusion_mode in {'hybrid', 'cross'})
+                        else None)
         self.concat_head = (nn.Sequential(
             nn.LayerNorm(self.n_streams * d), nn.Linear(self.n_streams * d, d),
             nn.GELU(), nn.Dropout(cfg.dropout_attn))
-            if cfg.fusion_mode == 'concat' else None)
+            if (not self.use_cell and cfg.fusion_mode == 'concat') else None)
 
         self.head_drop = nn.Dropout(cfg.dropout_head)
-        self.head_binary = nn.Linear(d, cfg.n_binary)
+        self.head_binary = (None if self.use_cell else nn.Linear(d, cfg.n_binary))
         # auxiliary，非對抗。use_source_head=False 時連參數都不建立，
         # 這樣 lambda_src 設了也不會有「有頭但沒梯度」的模糊狀態。
         self.head_source = (
             nn.Linear(d, cfg.n_sources) if cfg.use_source_head else None)
+
+    @property
+    def readout_attn_learned(self) -> bool:
+        """
+        readout_attn 那組數字是不是模型學出來的。
+
+        False 代表它是硬填的 1/N，拿去解讀「模型比較看重哪條流」就是編故事。
+        legacy 的 'self' / 'concat' 模式與參照組 ConcatCell 都屬於這一類。
+        """
+        if self.use_cell:
+            return STREAM_WEIGHT_IS_LEARNED.get(self.cfg.fusion_cell, True)
+        return self.cfg.fusion_mode in {'hybrid', 'cross'}
 
     # ── 輸入 ──────────────────────────────────────────────────────────
     def _to_tokens(self, feats: Dict[str, torch.Tensor]) -> torch.Tensor:
@@ -197,6 +237,24 @@ class FusionDetectorV2(nn.Module):
     def forward(self, feats: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """feats: {stream_name: (B, in_dim)}"""
         tokens = self._to_tokens(feats)
+
+        if self.cell is not None:
+            cell_out = self.cell(tokens)
+            out = {
+                'logits_binary': cell_out['logits_binary'],
+                'shared':        cell_out['shared'],
+                # 逐樣本 (B, N)。per-sample 變異數才能判斷權重有沒有真的隨樣本變；
+                # 只存 batch mean 的話，退化成常數的權重看起來會像學到了東西。
+                'readout_attn':  cell_out['stream_weight'],
+                'self_attn':     None,
+                'readout_attn_learned': self.readout_attn_learned,
+            }
+            if 'pair_weight' in cell_out:
+                out['pair_weight'] = cell_out['pair_weight']
+            if self.head_source is not None:
+                out['logits_source'] = self.head_source(
+                    self.head_drop(cell_out['shared']))
+            return out
 
         self_attn_w = None
         for layer in self.layers:
@@ -221,6 +279,10 @@ class FusionDetectorV2(nn.Module):
             'shared':        shared,
             'readout_attn':  readout_attn,   # (B, N) —— XAI 直接用這個
             'self_attn':     self_attn_w,    # (B, N, N)
+            # False = 這組數字是硬填的 1/N，不是模型學的。'self' 和 'concat'
+            # 模式下沒有這個標記的話，並排比較時會看到完美的 0.333/0.333/0.333，
+            # 看起來像學到的均衡，其實只是常數。
+            'readout_attn_learned': self.readout_attn_learned,
         }
         if self.head_source is not None:
             out['logits_source'] = self.head_source(h)
@@ -233,22 +295,37 @@ class FusionDetectorV2(nn.Module):
         return {
             'adapters':  count(self.adapters),
             'self_attn': count(self.layers),
+            # cell 路徑下這一欄就是「被比較的那個模組」的大小 ——
+            # 容量對齊對齊的正是它，所以它必須單獨可讀。
+            'fusion':    count(self.cell) if self.cell is not None else 0,
             'readout':   (count(self.readout) if self.readout is not None else 0)
                          + (count(self.concat_head) if self.concat_head is not None else 0)
                          + self.stream_embed.numel(),
-            'heads':     count(self.head_binary) + (
-                count(self.head_source) if self.head_source is not None else 0),
+            'heads':     (count(self.head_binary) if self.head_binary is not None else 0)
+                         + (count(self.head_source) if self.head_source is not None else 0),
             'total':     sum(p.numel() for p in self.parameters() if p.requires_grad),
         }
+
+    def fusion_diagnostics(self) -> Dict[str, object]:
+        """訓練後可直接讀的中介變數（cell 路徑才有）。"""
+        return self.cell.diagnostics() if self.cell is not None else {}
 
     def describe(self) -> str:
         p = self.n_parameters()
         dims = ', '.join(f"{s}:{self.cfg.stream_dims[s]}" for s in self.streams)
+        if self.use_cell:
+            fusion_desc = (f"cell={self.cfg.fusion_cell} width={self.cell_width}"
+                           f" params={p['fusion']:,}"
+                           + (f" (budget {self.cfg.cell_budget:,})"
+                              if self.cfg.cell_budget else ""))
+        else:
+            fusion_desc = f"legacy fusion_mode={self.cfg.fusion_mode}"
         return (
             f"FusionDetectorV2\n"
             f"  streams   : {self.n_streams} ({dims}) -> d_model={self.cfg.d_model}\n"
-            f"  fusion    : {self.cfg.fusion_mode}\n"
+            f"  fusion    : {fusion_desc}\n"
+            f"  attn_w    : {'learned' if self.readout_attn_learned else 'CONSTANT 1/N (not learned)'}\n"
             f"  params    : adapters {p['adapters']:,} | self-attn {p['self_attn']:,} | "
-            f"readout {p['readout']:,} | heads {p['heads']:,}\n"
+            f"fusion {p['fusion']:,} | readout {p['readout']:,} | heads {p['heads']:,}\n"
             f"  total     : {p['total']:,}"
         )

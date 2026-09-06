@@ -74,14 +74,19 @@ def evaluate(model, loader, device, streams=None) -> Dict[str, float]:
     model.eval()
     streams = list(streams) if streams else list(model.streams)
     probs, preds, gts, attns = [], [], [], []
+    learned = True
     for feats, y_bin, _ in loader:
         feats = {k: v.to(device) for k, v in feats.items()}
         out = model(feats)
+        learned = bool(out.get('readout_attn_learned', True))
         p = torch.softmax(out['logits_binary'], 1)[:, 1]
         probs.append(p.cpu()); preds.append(out['logits_binary'].argmax(1).cpu())
         gts.append(y_bin); attns.append(out['readout_attn'].cpu())
     probs = torch.cat(probs).numpy(); preds = torch.cat(preds).numpy()
-    gts = torch.cat(gts).numpy(); attn = torch.cat(attns).mean(0).numpy()
+    gts = torch.cat(gts).numpy()
+    attn_all = torch.cat(attns)                       # (N, n_streams) 逐樣本
+    attn = attn_all.mean(0).numpy()
+    attn_sd = attn_all.std(0).numpy()
     return {
         'acc': float(100.0 * (preds == gts).mean()),
         'auc': float(roc_auc_score(gts, probs)) if len(set(gts)) > 1 else 0.0,
@@ -89,6 +94,12 @@ def evaluate(model, loader, device, streams=None) -> Dict[str, float]:
         'fnr': float(100.0 * ((preds == 0) & (gts == 1)).sum() / max((gts == 1).sum(), 1)),
         'fpr': float(100.0 * ((preds == 1) & (gts == 0)).sum() / max((gts == 0).sum(), 1)),
         'readout_attn': {s: float(a) for s, a in zip(streams, attn)},
+        # ── 決定性的診斷 ──────────────────────────────────────────────
+        # 逐樣本標準差。趨近 0 就代表這組權重其實是常數，attention / gating
+        # 相對於一個固定加權平均沒有增益 —— 只看 batch mean 分不出這件事。
+        'readout_attn_std': {s: float(v) for s, v in zip(streams, attn_sd)},
+        # False = 那組權重是硬填的 1/N，不是模型學的，不可解讀。
+        'readout_attn_learned': learned,
     }
 
 
@@ -179,6 +190,10 @@ def run_one(cfg: RunConfig, bundles, cache, device, out_root: Path) -> Dict:
     result = {
         'name': cfg.name,
         'config': cfg.to_dict(),                  # 直接來自 dataclass，不是手寫字串
+        'params': model.n_parameters(),
+        # 中介變數。interact_scale 趨近 0 = 模型自己認為交互項沒用，
+        # 這比從準確率反推可靠得多。
+        'fusion_diagnostics': model.fusion_diagnostics(),
         'best_epoch': best['epoch'],
         'minutes': round(elapsed, 2),
         'val': {**best['val'],

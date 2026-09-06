@@ -20,7 +20,7 @@ v2_fusion.config — 所有超參數的唯一來源
 """
 
 from dataclasses import dataclass, field, asdict
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -121,6 +121,19 @@ class ModelConfig:
 
     # EXP2A: keep input streams fixed while changing only the fusion module.
     fusion_mode: str = 'hybrid'  # hybrid, self, cross, concat
+
+    # ── 三軸因子設計（見 fusion_cells.py）───────────────────────────
+    # None = 走 legacy 的 fusion_mode 路徑，現有結果完全可重現。
+    # 設了 cell_id 就改走 FusionCell，此時 fusion_mode / n_layers 被忽略。
+    #
+    # cell_id 格式 'o<1|2>.<static|gated>.<feat|dec>'，或參照組 'concat'。
+    fusion_cell: Optional[str] = None
+    cell_width: int = 64
+    # 給了 budget 就用二分搜尋反推 width（覆蓋 cell_width），
+    # 這是「參數量對齊」的實作。cell_params 是反推後的實際值，
+    # 由 sweep 回填 —— 「我們對齊了參數量」是要能被查核的宣稱。
+    cell_budget: Optional[int] = None
+    cell_params: Optional[int] = None
 
     # source head：預測「是哪個 source」的 auxiliary head，正常梯度。
     # 這不是 GRL —— GRL 已移除。預設關閉（LossConfig.lambda_src = 0）。
