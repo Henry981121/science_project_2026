@@ -1,0 +1,68 @@
+---
+  結果摘要
+
+  ┌────────┬─────────┬──────────────────────────────────────────────────────────┐
+  │ Stream │  狀態   │                         修復操作                         │
+  ├────────┼─────────┼──────────────────────────────────────────────────────────┤
+  │ CLIP   │ ✅ PASS │ 加 xai_mode 參數 + .detach() 在 numpy 轉換前             │
+  ├────────┼─────────┼──────────────────────────────────────────────────────────┤
+  │ FFT    │ ✅ PASS │ 加 xai_mode 參數 + .detach() 在 numpy 轉換前             │
+  ├────────┼─────────┼──────────────────────────────────────────────────────────┤
+  │ DCT    │ ✅ PASS │ 加 xai_mode 參數                                         │
+  ├────────┼─────────┼──────────────────────────────────────────────────────────┤
+  │ DIRE   │ ✅ PASS │ 加 xai_mode 參數                                         │
+  ├────────┼─────────┼──────────────────────────────────────────────────────────┤
+  │ Noise  │ ✅ PASS │ 加 xai_mode 參數 + 改 ReLU(inplace=True) → inplace=False │
+  └────────┴─────────┴──────────────────────────────────────────────────────────┘
+
+  ---
+  確認可進入 Grad-CAM 實作
+
+  ┌───────┬──────────────┬──────────────────┬────────────────────────┐
+  │  流   │ Target layer │ Activation shape │     Gradient shape     │
+  ├───────┼──────────────┼──────────────────┼────────────────────────┤
+  │ FFT   │ BasicBlock   │ (1, 512, 7, 7)   │ (1, 512, 7, 7)         │
+  ├───────┼──────────────┼──────────────────┼────────────────────────┤
+  │ DCT   │ BasicBlock   │ (1, 512, 7, 7)   │ (1, 512, 7, 7)         │
+  ├───────┼──────────────┼──────────────────┼────────────────────────┤
+  │ DIRE  │ Bottleneck   │ (1, 2048, 7, 7)  │ (1, 2048, 7, 7)        │
+  ├───────┼──────────────┼──────────────────┼────────────────────────┤
+  │ Noise │ ReLU         │ (1, 512, 28, 28) │ (1, 512, 28, 28)       │
+  ├───────┼──────────────┼──────────────────┼────────────────────────┤
+  │ CLIP  │ —            │ —                │ (用 attention rollout) │
+  └───────┴──────────────┴──────────────────┴────────────────────────┘
+
+  ---
+  改了什麼（5 個 extractor 檔案）
+
+  1. src/feature_extractors/clip_extractor.py
+
+  - extract_features() 加 xai_mode=False 參數
+  - _to_pil() 加 .detach() 避免 numpy() 衝突
+
+  2. src/feature_extractors/fft_extractor.py
+
+  - extract_features() 加 xai_mode=False 參數
+  - _compute_fft() 加 .detach() 避免 numpy() 衝突
+
+  3. src/feature_extractors/dct_extractor.py
+
+  - extract_features() 加 xai_mode=False 參數
+
+  4. src/feature_extractors/dire_extractor.py
+
+  - extract_features() 加 xai_mode=False 參數
+
+  5. src/feature_extractors/noise_extractor.py
+
+  - extract_features() 加 xai_mode=False 參數
+  - 4 個 nn.ReLU(inplace=True) 改為 inplace=False（不影響 checkpoint 載入）
+
+  ---
+  重要：對訓練/推論的副作用
+
+  - 預設 xai_mode=False：行為與原本完全相同（含 no_grad、eval()），不影響訓練速度與記憶體
+  - 僅當顯式傳 xai_mode=True：才解除 no_grad，允許梯度流
+  - Noise 的 inplace=False：理論上多消耗一份 activation memory（每層 ~50MB）但 Grad-CAM 必要
+
+  可以準備跑後續的 Grad-CAM 實作了。

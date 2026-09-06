@@ -9,7 +9,6 @@ Phase 2: 從硬碟讀取特徵，訓練輕量分類頭（很快）
 
 import sys
 
-
 import json
 import time
 from pathlib import Path
